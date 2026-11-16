@@ -43,7 +43,8 @@ WSL 的 pts 是相对首帧、靠 epoch 平移。采集端写的
 用法
 ----
     python measure_camera_latency_wsl.py --list
-    python measure_camera_latency_wsl.py --camera 0 --seconds 15 --repeat 3
+    python measure_camera_latency_wsl.py                  # 两路各 20 秒
+    python measure_camera_latency_wsl.py --repeat 3       # 各 20 秒 x 3 轮，取合并值
 
 依赖：opencv-python、qrcode、pillow、numpy（matplotlib 可选，用于画图）
 """
@@ -738,7 +739,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         epilog=(
             "示例：\n"
             "  python measure_camera_latency_wsl.py --list\n"
-            "  python measure_camera_latency_wsl.py --seconds 15   # 两路都测（默认）\n"
+            "  python measure_camera_latency_wsl.py               # 两路都测，各 20 秒\n"
         ),
     )
     parser.add_argument("--list", action="store_true", help="只枚举相机")
@@ -748,7 +749,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="只测第几路；不填则测 cam0 和 cam1（两路延迟不同，默认都测）",
     )
-    parser.add_argument("--seconds", type=float, default=15.0, help="录制时长，默认 15 秒")
+    parser.add_argument("--seconds", type=float, default=20.0, help="录制时长，默认 20 秒")
     parser.add_argument("--qr-size", type=int, default=800, help="二维码窗口边长，默认 800 px")
     parser.add_argument("--qr-hz", type=float, default=100.0, help="目标刷新率，默认 100 Hz")
     parser.add_argument("--repeat", type=int, default=1,

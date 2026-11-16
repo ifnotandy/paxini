@@ -60,7 +60,7 @@ WSL 路径的 pts 从 0 起（没有 ``-copyts``，ffmpeg 把首帧归零），�
     export PATH="$HOME/bin:$PATH"          # 静态 ffmpeg/ffprobe
     sudo timedatectl set-ntp false          # 测前关 NTP，见下方注意
     python3.10 latency/measure_camera_latency.py --list
-    python3.10 latency/measure_camera_latency.py --camera 0 --seconds 15
+    python3.10 latency/measure_camera_latency.py            # 两路各 20 秒
 
 把二维码窗口拖到相机正前方，占画面四分之一以上；按 q 可提前结束。
 
@@ -655,7 +655,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         epilog=(
             "示例：\n"
             "  python3.10 latency/measure_camera_latency.py --list\n"
-            "  python3.10 latency/measure_camera_latency.py --seconds 15   # 两路都测（默认）\n"
+            "  python3.10 latency/measure_camera_latency.py               # 两路都测，各 20 秒\n"
             "  python3.10 latency/measure_camera_latency.py --camera 1 --seconds 20 --qr-size 1000\n"
             "  python3.10 latency/measure_camera_latency.py --camera 0 --device /dev/video4\n"
         ),
@@ -667,7 +667,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="只测第几路；不填则测 cam0 和 cam1（两路外接相机，默认都测）",
     )
-    parser.add_argument("--seconds", type=float, default=15.0, help="录制时长，默认 15 秒")
+    parser.add_argument("--seconds", type=float, default=20.0, help="录制时长，默认 20 秒")
     parser.add_argument("--qr-size", type=int, default=800, help="二维码窗口边长（像素），默认 800")
     parser.add_argument("--qr-hz", type=float, default=100.0, help="目标刷新率，默认 100 Hz")
     parser.add_argument(
