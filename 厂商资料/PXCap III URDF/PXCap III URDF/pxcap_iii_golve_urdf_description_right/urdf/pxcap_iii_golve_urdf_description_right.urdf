@@ -1,0 +1,650 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- This URDF was automatically created by SolidWorks to URDF Exporter! Originally created by Stephen Brawner (brawner@gmail.com) 
+     Commit Version: 1.6.0-4-g7f85cfe  Build Version: 1.6.7995.38578
+     For more information, please see http://wiki.ros.org/sw_urdf_exporter -->
+<robot
+  name="pxcap_iii_golve_urdf_description_right">
+  <link
+    name="right_palm_link">
+    <inertial>
+      <origin
+        xyz="-0.0020376 0.015652 -0.037215"
+        rpy="0 0 0" />
+      <mass
+        value="0.24438" />
+      <inertia
+        ixx="0.00028858"
+        ixy="-1.6939E-05"
+        ixz="8.4411E-06"
+        iyy="0.00029191"
+        iyz="3.7893E-05"
+        izz="0.00045963" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://pxcap_iii_golve_urdf_description_right/meshes/right_palm_link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="1 1 1 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://pxcap_iii_golve_urdf_description_right/meshes/right_palm_link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <link
+    name="right_index_link_0">
+    <inertial>
+      <origin
+        xyz="0.00024122 -0.0053423 -0.036908"
+        rpy="0 0 0" />
+      <mass
+        value="0.0060056" />
+      <inertia
+        ixx="1.888E-06"
+        ixy="-4.3423E-07"
+        ixz="7.7686E-08"
+        iyy="2.061E-06"
+        iyz="2.3654E-07"
+        izz="1.3821E-06" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://pxcap_iii_golve_urdf_description_right/meshes/right_index_link_0.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="1 1 1 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://pxcap_iii_golve_urdf_description_right/meshes/right_index_link_0.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="right_index_joint_0"
+    type="revolute">
+    <origin
+      xyz="0.03877 -0.022678 -0.063811"
+      rpy="0 0 0" />
+    <parent
+      link="right_palm_link" />
+    <child
+      link="right_index_link_0" />
+    <axis
+      xyz="1 0 0" />
+    <limit
+      lower="-0.0174"
+      upper="0.9769"
+      effort="0"
+      velocity="0" />
+  </joint>
+  <link
+    name="right_index_link_1">
+    <inertial>
+      <origin
+        xyz="-0.0084922 0.007665 -0.025782"
+        rpy="0 0 0" />
+      <mass
+        value="0.013737" />
+      <inertia
+        ixx="3.0704E-06"
+        ixy="-3.522E-09"
+        ixz="-4.4968E-08"
+        iyy="3.6869E-06"
+        iyz="1.9026E-07"
+        izz="2.5422E-06" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://pxcap_iii_golve_urdf_description_right/meshes/right_index_link_1.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="1 1 1 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://pxcap_iii_golve_urdf_description_right/meshes/right_index_link_1.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="right_index_joint_1"
+    type="revolute">
+    <origin
+      xyz="0 0.0044873 -0.054816"
+      rpy="0 0 0" />
+    <parent
+      link="right_index_link_0" />
+    <child
+      link="right_index_link_1" />
+    <axis
+      xyz="1 0 0" />
+    <limit
+      lower="-0.0174"
+      upper="0.6978"
+      effort="0"
+      velocity="0" />
+  </joint>
+  <link
+    name="right_index_tactile_link_0">
+    <inertial>
+      <origin
+        xyz="-3.8644E-05 0.019979 0.0032357"
+        rpy="0 0 0" />
+      <mass
+        value="0.0070418" />
+      <inertia
+        ixx="1.1259E-06"
+        ixy="5.1666E-09"
+        ixz="1.4063E-10"
+        iyy="3.3615E-07"
+        iyz="-1.2721E-09"
+        izz="1.389E-06" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://pxcap_iii_golve_urdf_description_right/meshes/right_index_tactile_link_0.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="1 1 1 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://pxcap_iii_golve_urdf_description_right/meshes/right_index_tactile_link_0.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="right_index_tactile_joint_0"
+    type="fixed">
+    <origin
+      xyz="-0.008452 0.019722 -0.008009"
+      rpy="-1.5869 0 0" />
+    <parent
+      link="right_index_link_1" />
+    <child
+      link="right_index_tactile_link_0" />
+    <axis
+      xyz="0 0 0" />
+  </joint>
+  <link
+    name="right_middle_link_0">
+    <inertial>
+      <origin
+        xyz="0.01297 -0.0093083 -0.035567"
+        rpy="0 0 0" />
+      <mass
+        value="0.0095868" />
+      <inertia
+        ixx="3.2446E-06"
+        ixy="1.162E-06"
+        ixz="-3.0923E-07"
+        iyy="6.6077E-06"
+        iyz="3.796E-07"
+        izz="5.0106E-06" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://pxcap_iii_golve_urdf_description_right/meshes/right_middle_link_0.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="1 1 1 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://pxcap_iii_golve_urdf_description_right/meshes/right_middle_link_0.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="right_middle_joint_0"
+    type="revolute">
+    <origin
+      xyz="-0.04223 -0.022678 -0.063811"
+      rpy="0 0 0" />
+    <parent
+      link="right_palm_link" />
+    <child
+      link="right_middle_link_0" />
+    <axis
+      xyz="1 0 0" />
+    <limit
+      lower="-0.0174"
+      upper="0.9769"
+      effort="0"
+      velocity="0" />
+  </joint>
+  <link
+    name="right_middle_link_1">
+    <inertial>
+      <origin
+        xyz="0.021595 0.0070332 -0.034117"
+        rpy="0 0 0" />
+      <mass
+        value="0.027837" />
+      <inertia
+        ixx="8.688E-06"
+        ixy="-1.6596E-07"
+        ixz="5.9118E-08"
+        iyy="1.6641E-05"
+        iyz="9.4387E-07"
+        izz="1.3104E-05" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://pxcap_iii_golve_urdf_description_right/meshes/right_middle_link_1.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="1 1 1 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://pxcap_iii_golve_urdf_description_right/meshes/right_middle_link_1.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="right_middle_joint_1"
+    type="revolute">
+    <origin
+      xyz="0 0.0044873 -0.054816"
+      rpy="0 0 0" />
+    <parent
+      link="right_middle_link_0" />
+    <child
+      link="right_middle_link_1" />
+    <axis
+      xyz="1 0 0" />
+    <limit
+      lower="-0.0174"
+      upper="0.6978"
+      effort="0"
+      velocity="0" />
+  </joint>
+  <link
+    name="right_middle_tactile_link_0">
+    <inertial>
+      <origin
+        xyz="-3.8644E-05 0.019979 0.0032357"
+        rpy="0 0 0" />
+      <mass
+        value="0.0070418" />
+      <inertia
+        ixx="1.1259E-06"
+        ixy="5.1666E-09"
+        ixz="1.4063E-10"
+        iyy="3.3615E-07"
+        iyz="-1.2721E-09"
+        izz="1.389E-06" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://pxcap_iii_golve_urdf_description_right/meshes/right_middle_tactile_link_0.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="1 1 1 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://pxcap_iii_golve_urdf_description_right/meshes/right_middle_tactile_link_0.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="right_middle_tactile_joint_0"
+    type="fixed">
+    <origin
+      xyz="0.0353947709461826 0.0195559730409423 -0.0183554692384683"
+      rpy="-1.58685335591322 0 0" />
+    <parent
+      link="right_middle_link_1" />
+    <child
+      link="right_middle_tactile_link_0" />
+    <axis
+      xyz="0 0 0" />
+  </joint>
+  <link
+    name="right_middle_tactile_link_1">
+    <inertial>
+      <origin
+        xyz="-3.8644E-05 0.019979 0.0032357"
+        rpy="0 0 0" />
+      <mass
+        value="0.0070418" />
+      <inertia
+        ixx="1.1259E-06"
+        ixy="5.1666E-09"
+        ixz="1.4063E-10"
+        iyy="3.3615E-07"
+        iyz="-1.2721E-09"
+        izz="1.389E-06" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://pxcap_iii_golve_urdf_description_right/meshes/right_middle_tactile_link_1.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="1 1 1 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://pxcap_iii_golve_urdf_description_right/meshes/right_middle_tactile_link_1.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="right_middle_tactile_joint_1"
+    type="fixed">
+    <origin
+      xyz="0.00987477094618254 0.0195559730409458 -0.0183554692384682"
+      rpy="-1.58685335591322 0 0" />
+    <parent
+      link="right_middle_link_1" />
+    <child
+      link="right_middle_tactile_link_1" />
+    <axis
+      xyz="0 0 0" />
+  </joint>
+  <link
+    name="right_palm_tactile_link_0">
+    <inertial>
+      <origin
+        xyz="-0.0003238 0.040726 0.00062225"
+        rpy="0 0 0" />
+      <mass
+        value="0.022509" />
+      <inertia
+        ixx="1.256E-05"
+        ixy="6.6238E-09"
+        ixz="1.611E-08"
+        iyy="2.039E-06"
+        iyz="-7.9531E-08"
+        izz="1.4301E-05" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://pxcap_iii_golve_urdf_description_right/meshes/right_palm_tactile_link_0.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="1 1 1 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://pxcap_iii_golve_urdf_description_right/meshes/right_palm_tactile_link_0.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="right_palm_tactile_joint_0"
+    type="fixed">
+    <origin
+      xyz="0.039263 0.036313 -0.054425"
+      rpy="3.1416 0.30957 -1.5709" />
+    <parent
+      link="right_palm_link" />
+    <child
+      link="right_palm_tactile_link_0" />
+    <axis
+      xyz="0 0 0" />
+  </joint>
+  <link
+    name="right_palm_tactile_link_1">
+    <inertial>
+      <origin
+        xyz="-1.0795E-05 0.014414 0.0032632"
+        rpy="0 0 0" />
+      <mass
+        value="0.0053755" />
+      <inertia
+        ixx="4.421E-07"
+        ixy="8.958E-10"
+        ixz="-2.4086E-10"
+        iyy="2.7965E-07"
+        iyz="-1.9347E-09"
+        izz="6.6911E-07" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://pxcap_iii_golve_urdf_description_right/meshes/right_palm_tactile_link_1.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="1 1 1 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://pxcap_iii_golve_urdf_description_right/meshes/right_palm_tactile_link_1.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="right_palm_tactile_joint_1"
+    type="fixed">
+    <origin
+      xyz="-0.044723 0.068242 -0.050265"
+      rpy="-3.1416 0.30516 1.5708" />
+    <parent
+      link="right_palm_link" />
+    <child
+      link="right_palm_tactile_link_1" />
+    <axis
+      xyz="0 0 0" />
+  </joint>
+  <link
+    name="right_palm_tactile_link_2">
+    <inertial>
+      <origin
+        xyz="-1.08E-05 0.014414 0.0032632"
+        rpy="0 0 0" />
+      <mass
+        value="0.0053755" />
+      <inertia
+        ixx="4.421E-07"
+        ixy="8.9583E-10"
+        ixz="-2.4084E-10"
+        iyy="2.7965E-07"
+        iyz="-1.9346E-09"
+        izz="6.6911E-07" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://pxcap_iii_golve_urdf_description_right/meshes/right_palm_tactile_link_2.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="1 1 1 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://pxcap_iii_golve_urdf_description_right/meshes/right_palm_tactile_link_2.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="right_palm_tactile_joint_2"
+    type="fixed">
+    <origin
+      xyz="0.029908 0.059271 -0.051345"
+      rpy="-2.1214 0.00025767 3.1416" />
+    <parent
+      link="right_palm_link" />
+    <child
+      link="right_palm_tactile_link_2" />
+    <axis
+      xyz="0 0 0" />
+  </joint>
+  <link
+    name="right_palm_tactile_link_3">
+    <inertial>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <mass
+        value="0" />
+      <inertia
+        ixx="0"
+        ixy="0"
+        ixz="0"
+        iyy="0"
+        iyz="0"
+        izz="0" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://pxcap_iii_golve_urdf_description_right/meshes/right_palm_tactile_link_3.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="1 1 1 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://pxcap_iii_golve_urdf_description_right/meshes/right_palm_tactile_link_3.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="right_palm_tactile_joint_3"
+    type="fixed">
+    <origin
+      xyz="0.0221118574989706 0.0808517865781429 -0.0797184831818818"
+      rpy="-3.14159265345404 0.446752597230184 1.57079632685341" />
+    <parent
+      link="right_palm_link" />
+    <child
+      link="right_palm_tactile_link_3" />
+    <axis
+      xyz="0 0 0" />
+  </joint>
+</robot>

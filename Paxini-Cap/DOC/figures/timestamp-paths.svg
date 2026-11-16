@@ -1,0 +1,82 @@
+<svg width="680" height="380" viewBox="0 0 680 380" xmlns="http://www.w3.org/2000/svg" role="img">
+  <title>同一次动作，三个来源把时间戳打在不同位置</title>
+  <desc>时间线以物理事件为零点：手套要等串口收齐、SDK 组完一整帧才在主机侧打戳；相机要经过曝光、MJPEG 编码、USB 传输、驱动缓冲，ffmpeg 收帧时才打戳；Quest 的戳落在哪个位置无从判断，SDK 未公开时钟基准。设备端不参与打戳。</desc>
+
+  <rect x="0" y="0" width="680" height="380" fill="#F7F6F3"/>
+
+  <text x="24" y="27" font-family="ui-sans-serif,system-ui,sans-serif" font-size="13" fill="#2C2C2A">同一次动作，三个来源把时间戳打在不同位置</text>
+  <text x="24" y="45" font-family="ui-sans-serif,system-ui,sans-serif" font-size="10.5" fill="#888780">横轴是链路消耗掉的时间。设备端不打戳，两个戳都落在主机侧、帧收齐之后（延迟数值为示意）</text>
+
+  <!-- 时间轴 -->
+  <line x1="110" y1="64" x2="612" y2="64" stroke="#888780" stroke-width="1"/>
+  <path d="M604 60 L614 64 L604 68" fill="none" stroke="#888780" stroke-width="1"/>
+  <line x1="110" y1="58" x2="110" y2="70" stroke="#888780" stroke-width="1"/>
+  <line x1="200" y1="58" x2="200" y2="70" stroke="#888780" stroke-width="1"/>
+  <line x1="290" y1="58" x2="290" y2="70" stroke="#888780" stroke-width="1"/>
+  <line x1="380" y1="58" x2="380" y2="70" stroke="#888780" stroke-width="1"/>
+  <line x1="470" y1="58" x2="470" y2="70" stroke="#888780" stroke-width="1"/>
+  <line x1="560" y1="58" x2="560" y2="70" stroke="#888780" stroke-width="1"/>
+  <text x="110" y="82" text-anchor="middle" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="9.5" fill="#888780">0</text>
+  <text x="200" y="82" text-anchor="middle" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="9.5" fill="#888780">10</text>
+  <text x="290" y="82" text-anchor="middle" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="9.5" fill="#888780">20</text>
+  <text x="380" y="82" text-anchor="middle" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="9.5" fill="#888780">30</text>
+  <text x="470" y="82" text-anchor="middle" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="9.5" fill="#888780">40</text>
+  <text x="560" y="82" text-anchor="middle" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="9.5" fill="#888780">50 ms</text>
+
+  <!-- 参考线：先画，之后被色块遮住 -->
+  <line x1="110" y1="88" x2="110" y2="272" stroke="#B4B2A9" stroke-width="0.75" stroke-dasharray="3 4"/>
+  <text x="114" y="96" font-family="ui-sans-serif,system-ui,sans-serif" font-size="9.5" fill="#888780">物理事件：采样 / 光子入射的那一刻（真实零点）</text>
+  <line x1="380" y1="70" x2="380" y2="242" stroke="#E24B4A" stroke-width="0.75" stroke-dasharray="3 4" opacity="0.45"/>
+  <line x1="425" y1="70" x2="425" y2="187" stroke="#378ADD" stroke-width="0.75" stroke-dasharray="3 4" opacity="0.7"/>
+  <line x1="182" y1="70" x2="182" y2="111" stroke="#185FA5" stroke-width="0.75" stroke-dasharray="3 4" opacity="0.7"/>
+
+  <!-- 手套 -->
+  <text x="24" y="120" font-family="ui-sans-serif,system-ui,sans-serif" font-size="11.5" fill="#185FA5">手套</text>
+  <text x="24" y="134" font-family="ui-sans-serif,system-ui,sans-serif" font-size="9.5" fill="#888780">SDK 在主机打戳</text>
+
+  <rect x="110" y="111" width="54" height="14" fill="#D3E5F7"/>
+  <rect x="164" y="111" width="18" height="14" fill="#BBD8F1"/>
+  <text x="146" y="140" text-anchor="middle" font-family="ui-sans-serif,system-ui,sans-serif" font-size="9" fill="#5F5E5A">串口传输 + 组帧</text>
+
+  <circle cx="182" cy="118" r="6" fill="#85B7EB" stroke="#185FA5" stroke-width="1"/>
+  <text x="194" y="115" font-family="ui-sans-serif,system-ui,sans-serif" font-size="10.5" fill="#2C2C2A">SDK 组完一整帧才打戳</text>
+  <text x="194" y="130" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="9.5" fill="#185FA5">unix / monotonic 都是主机钟</text>
+
+  <!-- 相机 -->
+  <text x="24" y="194" font-family="ui-sans-serif,system-ui,sans-serif" font-size="11.5" fill="#185FA5">相机</text>
+  <text x="24" y="208" font-family="ui-sans-serif,system-ui,sans-serif" font-size="9.5" fill="#888780">主机打戳</text>
+
+  <rect x="110" y="187" width="72" height="14" fill="#D3E5F7"/>
+  <rect x="182" y="187" width="63" height="14" fill="#BBD8F1"/>
+  <rect x="245" y="187" width="135" height="14" fill="#A3CAEB"/>
+  <rect x="380" y="187" width="45" height="14" fill="#8ABCE4"/>
+  <text x="146" y="214" text-anchor="middle" font-family="ui-sans-serif,system-ui,sans-serif" font-size="9" fill="#5F5E5A">曝光</text>
+  <text x="213" y="214" text-anchor="middle" font-family="ui-sans-serif,system-ui,sans-serif" font-size="9" fill="#5F5E5A">MJPEG 编码</text>
+  <text x="312" y="214" text-anchor="middle" font-family="ui-sans-serif,system-ui,sans-serif" font-size="9" fill="#5F5E5A">USB 传输</text>
+  <text x="402" y="214" text-anchor="middle" font-family="ui-sans-serif,system-ui,sans-serif" font-size="9" fill="#5F5E5A">驱动缓冲</text>
+
+  <circle cx="425" cy="194" r="6" fill="#85B7EB" stroke="#185FA5" stroke-width="1"/>
+  <text x="437" y="191" font-family="ui-sans-serif,system-ui,sans-serif" font-size="10.5" fill="#2C2C2A">ffmpeg 收到帧才打戳</text>
+  <text x="437" y="205" font-family="ui-sans-serif,system-ui,sans-serif" font-size="9.5" fill="#185FA5">t ≈ 35 ms，随负载抖 ±10</text>
+
+  <!-- Quest -->
+  <text x="24" y="258" font-family="ui-sans-serif,system-ui,sans-serif" font-size="11.5" fill="#A32D2D">Quest</text>
+  <text x="24" y="272" font-family="ui-sans-serif,system-ui,sans-serif" font-size="9.5" fill="#888780">SDK 打戳</text>
+
+  <line x1="110" y1="250" x2="470" y2="250" stroke="#E24B4A" stroke-width="1" stroke-dasharray="5 5" opacity="0.55"/>
+  <circle cx="380" cy="250" r="8" fill="#F7F6F3" stroke="#E24B4A" stroke-width="1"/>
+  <text x="380" y="254" text-anchor="middle" font-family="ui-sans-serif,system-ui,sans-serif" font-size="10" fill="#A32D2D">?</text>
+  <text x="394" y="247" font-family="ui-sans-serif,system-ui,sans-serif" font-size="10.5" fill="#2C2C2A">戳落在哪个位置，无从判断</text>
+  <text x="394" y="261" font-family="ui-sans-serif,system-ui,sans-serif" font-size="9.5" fill="#A32D2D">起点与基准官方没写（清单 C8）</text>
+
+  <line x1="24" y1="290" x2="656" y2="290" stroke="#D8D5CB" stroke-width="1"/>
+
+  <circle cx="30" cy="307" r="3" fill="#378ADD"/>
+  <text x="40" y="311" font-family="ui-sans-serif,system-ui,sans-serif" font-size="10.5" fill="#5F5E5A">手套和相机的戳含义相同——都是「帧在主机可用的时刻」；差的那几十毫秒来自链路长短，按「固定偏移 + 抖动」处理</text>
+
+  <circle cx="30" cy="329" r="3" fill="#1D9E75"/>
+  <text x="40" y="333" font-family="ui-sans-serif,system-ui,sans-serif" font-size="10.5" fill="#5F5E5A">两个戳都不代表设备采样时刻；主机校时一改，这两列一起被改写——设备端没有自己的钟，也就不存在「手套自己校时」</text>
+
+  <circle cx="30" cy="351" r="3" fill="#E24B4A"/>
+  <text x="40" y="355" font-family="ui-sans-serif,system-ui,sans-serif" font-size="10.5" fill="#5F5E5A">Quest 的戳位置未知，所以现在只能算它自己的增量；等 C8 验完时钟域，才能把它钉到这条线上</text>
+</svg>

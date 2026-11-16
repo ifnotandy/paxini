@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dex-admittance"
+version = "0.1.0"
+description = "Force admittance control prototype for Paxini PXDex III"
+requires-python = ">=3.10"
+dependencies = ["PyYAML>=5.4"]
+
+[project.optional-dependencies]
+dev = []
+
+[project.scripts]
+dex-admittance = "dex_admittance.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["dex_admittance*"]

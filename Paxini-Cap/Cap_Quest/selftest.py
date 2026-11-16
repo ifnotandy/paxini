@@ -1,0 +1,1110 @@
+#!/usr/bin/env python3
+"""Hardware-free self test for the PXCap III collector.
+
+Covers the parts that are easy to get silently wrong:
+
+1. callback frame parsing, including the "read by count, not by 119" rule;
+2. Quest sample collection in ``quest3`` (four SDK timestamps, no host clock);
+3. Quest row building, with the four timestamps and missing fields;
+4. HDF5 write/read with two independent row axes (glove N, Quest Q);
+5. the per-group row-consistency self check;
+6. ``--omit-distribution`` mode;
+7. the live-view hook, one push per recorded frame;
+8. config file parsing and CLI precedence;
+9. replay payload thinning, clock quality, and camera video offsets.
+
+Alignment is deliberately not tested here: the collector does not align.
+
+Run with ``python3.10 selftest.py``; exit status 0 means every case passed.
+"""
+
+from __future__ import annotations
+
+import json
+import math
+import shutil
+import tempfile
+import types
+from pathlib import Path
+from typing import Any
+
+import h5py
+import numpy as np
+
+from camera_ffmpeg import parse_rate
+from collect_cap import (
+    BUTTON_NAMES,
+    CAP_MAX_POINTS,
+    CAP_SLOT_POINTS,
+    CAP_SLOTS,
+    STOP_EVENT,
+    Hdf5Recorder,
+    apply_config,
+    build_parser,
+    load_config_file,
+    pump_and_record,
+    quest_sample_to_row,
+    snapshot_cap_frame,
+)
+from quest3 import XrtReader
+from visualize import (
+    build_preview,
+    camera_tracks,
+    clock_quality,
+    collect_payload,
+    prepare_videos,
+    take_envelope,
+)
+
+PASSED: list[str] = []
+FAILED: list[str] = []
+
+
+def check(name: str, condition: bool, detail: str = "") -> None:
+    if condition:
+        PASSED.append(name)
+    else:
+        FAILED.append(f"{name}{(': ' + detail) if detail else ''}")
+
+
+class FakeVector:
+    __slots__ = ("x", "y", "z")
+
+    def __init__(self, x: int, y: int, z: int) -> None:
+        self.x, self.y, self.z = x, y, z
+
+
+class FakeDistributeSlot:
+    """Mirrors PxCap3SensorDistributeForceData: 119 slots, ``count`` valid."""
+
+    def __init__(self, count: int) -> None:
+        self.count = count
+        self.values = [
+            FakeVector(index - 60, 60 - index, index % 256)
+            for index in range(CAP_MAX_POINTS)
+        ]
+
+
+class FakeStruct:
+    def __init__(self, **fields: object) -> None:
+        for key, value in fields.items():
+            setattr(self, key, value)
+
+
+def make_frame(
+    unix_ns: int,
+    monotonic_ns: int,
+    angles: dict[str, float] | None = None,
+) -> FakeStruct:
+    angle_values = angles or {
+        "index_proximal": 12.5,
+        "index_distal": 3.25,
+        "middle_proximal": -1.5,
+        "middle_distal": 0.0,
+    }
+    return FakeStruct(
+        timestamp_unix_ns=unix_ns,
+        timestamp_monotonic_ns=monotonic_ns,
+        encoder_raw=FakeStruct(
+            index_proximal=101,
+            index_distal=102,
+            middle_proximal=103,
+            middle_distal=104,
+        ),
+        joint_angles=FakeStruct(**angle_values),
+        resultant_force=FakeStruct(
+            **{
+                slot: FakeVector(index, -index, index * 2)
+                for index, slot in enumerate(CAP_SLOTS)
+            }
+        ),
+        distribute_force=FakeStruct(
+            **{
+                slot: FakeDistributeSlot(CAP_SLOT_POINTS[slot])
+                for slot in CAP_SLOTS
+            }
+        ),
+    )
+
+
+def make_pose(x: float, y: float, z: float) -> list[float]:
+    return [x, y, z, 0.0, 0.0, 0.0, 1.0]
+
+
+def make_quest_sample(sequence: int, base_ns: int = 1_700_000_000_000_000_000) -> dict:
+    return {
+        "sequence": sequence,
+        "sdk_timestamp_ns": base_ns + sequence * 1_000_000,
+        "body_timestamp_ns": base_ns + sequence * 1_000_000 + 10,
+        "motion_timestamp_ns": base_ns + sequence * 1_000_000 + 20,
+        "body_joints_timestamp_ns": [
+            base_ns + sequence * 1_000_000 + 100 + index for index in range(24)
+        ],
+        "tracked": True,
+        "head": {
+            "available": True,
+            "tracked": True,
+            "pose_xyzw": make_pose(0.1, 1.6, -0.2),
+        },
+        "controllers": {
+            "left": {
+                "pose": {
+                    "available": True,
+                    "tracked": False,
+                    "pose_xyzw": make_pose(-0.3, 1.1, 0.4),
+                },
+                "grip": 0.5,
+                "trigger": None,
+                "axis": [0.25, -0.25],
+            },
+            "right": {
+                "pose": {
+                    "available": True,
+                    "tracked": True,
+                    "pose_xyzw": make_pose(0.3, 1.2, 0.5),
+                },
+                "grip": 0.75,
+                "trigger": 0.125,
+                "axis": [0.5, 0.0],
+            },
+        },
+        "hands": {
+            "left": {"active": False, "joint_count": 0, "joints_pose_xyzw": None},
+            "right": {
+                "active": True,
+                "joint_count": 2,
+                "joints_pose_xyzw": [
+                    make_pose(0.0, 0.0, 0.0),
+                    make_pose(0.0, 0.1, 0.0),
+                ],
+            },
+        },
+        "buttons": {"A": True, "B": False},
+    }
+
+
+def test_frame_parsing() -> None:
+    frame = make_frame(1_700_000_000_000_000_000, 5_000)
+    sample = snapshot_cap_frame(frame, True)
+
+    check(
+        "帧解析/时间戳只有 SDK 给的两个",
+        sample["timestamp_unix_ns"] == 1_700_000_000_000_000_000
+        and sample["timestamp_monotonic_ns"] == 5_000
+        and "received_monotonic_ns" not in sample,
+        str(sorted(k for k in sample if "timestamp" in k or "received" in k)),
+    )
+    check(
+        "帧解析/编码器",
+        sample["encoder_raw"].dtype == np.int32
+        and sample["encoder_raw"].tolist() == [101, 102, 103, 104],
+    )
+    check(
+        "帧解析/关节角",
+        sample["joint_angles_deg"].dtype == np.float64
+        and sample["joint_angles_deg"].tolist() == [12.5, 3.25, -1.5, 0.0],
+    )
+    check(
+        "帧解析/合力形状与数值",
+        sample["resultant_force"].shape == (10, 3)
+        and sample["resultant_force"].dtype == np.int16
+        and sample["resultant_force"][9].tolist() == [9, -9, 18],
+    )
+
+    distribute = sample["distribute_force"]
+    check(
+        "帧解析/分布力形状",
+        distribute is not None and distribute.shape == (10, CAP_MAX_POINTS, 3),
+    )
+    total = int(sample["distribute_counts"].sum())
+    check("帧解析/444 点合计", total == 444, f"实际 {total}")
+    check(
+        "帧解析/每槽位有效点数",
+        sample["distribute_counts"].tolist()
+        == [CAP_SLOT_POINTS[slot] for slot in CAP_SLOTS],
+    )
+    check(
+        "帧解析/按 count 裁掉尾部",
+        int(distribute[1, 20:].sum()) == 0 and int(distribute[1, 19].sum()) != 0,
+        "thumb_two 只应有前 20 点非零",
+    )
+    check(
+        "帧解析/palm_zero 满 119 点",
+        int((np.abs(distribute[8]).sum(axis=1) > 0).sum()) == 119,
+    )
+    check(
+        "帧解析/x y 有符号、z 无符号",
+        distribute[8, 0].tolist() == [-60, 60, 0]
+        and distribute[8, 59].tolist() == [-1, 1, 59]
+        and distribute[8, 118].tolist() == [58, -58, 118],
+        "palm_zero（119 点）用来覆盖全部索引",
+    )
+    check(
+        "帧解析/未知角度写 NaN",
+        math.isnan(
+            snapshot_cap_frame(
+                make_frame(1, 2, {"index_proximal": math.nan,
+                                  "index_distal": 1.0,
+                                  "middle_proximal": 2.0,
+                                  "middle_distal": 3.0}),
+                True,
+            )["joint_angles_deg"][0]
+        ),
+    )
+
+    short_frame = make_frame(1_700_000_000_000_000_000, 5_000)
+    short_frame.distribute_force.thumb_one = FakeDistributeSlot(49)
+    short_frame.distribute_force.thumb_one.values = (
+        short_frame.distribute_force.thumb_one.values[:30]
+    )
+    short = snapshot_cap_frame(short_frame, True)
+    check(
+        "帧解析/counts 不超过实际写入的点数",
+        int(short["distribute_counts"][0]) == 30
+        and int((np.abs(short["distribute_force"][0]).sum(axis=1) > 0).sum()) == 30,
+        f"count={int(short['distribute_counts'][0])}",
+    )
+
+    omitted = snapshot_cap_frame(frame, False)
+    check("帧解析/--omit-distribution 不建分布力", omitted["distribute_force"] is None)
+    check(
+        "帧解析/--omit-distribution 仍记有效点数",
+        omitted["distribute_counts"].tolist()
+        == [CAP_SLOT_POINTS[slot] for slot in CAP_SLOTS],
+    )
+
+
+def test_quest_row() -> None:
+    sample = make_quest_sample(1)
+    row = quest_sample_to_row(sample, "controller", "right")
+
+    check(
+        "Quest 行/四个 SDK 时间戳",
+        row["quest/sdk_timestamp_ns"] == sample["sdk_timestamp_ns"]
+        and row["quest/body_timestamp_ns"] == sample["body_timestamp_ns"]
+        and row["quest/motion_timestamp_ns"] == sample["motion_timestamp_ns"]
+        and row["quest/body_joints_timestamp_ns"].shape == (24,)
+        and row["quest/body_joints_timestamp_ns"][0]
+        == sample["body_joints_timestamp_ns"][0],
+        str({k: v for k, v in row.items() if "timestamp" in k}),
+    )
+    check(
+        "Quest 行/不再记主机侧时间戳",
+        not any("host" in key for key in row),
+        str([key for key in row if "host" in key]),
+    )
+    check("Quest 行/序号", row["quest/sequence"] == 1)
+    check(
+        "Quest 行/主 pose 取右手柄",
+        row["quest/pose_6d"].tolist()[:3] == [0.3, 1.2, 0.5],
+    )
+    check(
+        "Quest 行/头显位姿",
+        row["quest/head/pose_xyzw"].tolist()[:3] == [0.1, 1.6, -0.2]
+        and row["quest/head/tracked"] is True
+        and row["quest/head/available"] is True,
+    )
+    check(
+        "Quest 行/手柄 grip trigger axis",
+        row["quest/controller_right/grip"] == 0.75
+        and row["quest/controller_right/trigger"] == 0.125
+        and row["quest/controller_right/axis"].tolist() == [0.5, 0.0],
+    )
+    check(
+        "Quest 行/缺失 trigger 为 NaN",
+        math.isnan(row["quest/controller_left/trigger"]),
+    )
+    check(
+        "Quest 行/手部关节补齐到 26",
+        row["quest/hand_right/joints_pose_xyzw"].shape == (26, 7)
+        and row["quest/hand_right/joint_count"] == 2
+        and not math.isnan(row["quest/hand_right/joints_pose_xyzw"][1, 1])
+        and math.isnan(row["quest/hand_right/joints_pose_xyzw"][2, 0]),
+    )
+    check(
+        "Quest 行/未激活手全 NaN",
+        row["quest/hand_left/joint_count"] == 0
+        and bool(np.all(np.isnan(row["quest/hand_left/joints_pose_xyzw"]))),
+    )
+    check(
+        "Quest 行/按键",
+        row["quest/buttons/A"] is True
+        and all(
+            row[f"quest/buttons/{name}"] is False
+            for name in BUTTON_NAMES
+            if name != "A"
+        ),
+    )
+    check(
+        "Quest 行/SDK 没给时间戳时写 -1",
+        quest_sample_to_row(
+            {**sample, "sdk_timestamp_ns": None}, "controller", "right"
+        )["quest/sdk_timestamp_ns"]
+        == -1,
+    )
+    check(
+        "Quest 行/head 模式取头显",
+        quest_sample_to_row(sample, "head", "right")["quest/pose_6d"].tolist()[:3]
+        == [0.1, 1.6, -0.2],
+    )
+    check(
+        "Quest 行/body_joints 不足 24 时补 -1",
+        quest_sample_to_row(
+            {**sample, "body_joints_timestamp_ns": [1, 2, 3]},
+            "controller",
+            "right",
+        )["quest/body_joints_timestamp_ns"][3]
+        == -1,
+    )
+    check(
+        "Quest 行/不再有配对字段",
+        "quest/available" not in row
+        and "quest/skew_ns" not in row
+        and not any(key.startswith("_") for key in row),
+    )
+
+
+class FakePoseXrt:
+    """只有位姿接口，没有时间戳——对应 SDK 缺 getter 的情形。"""
+
+    def get_headset_pose(self) -> list[float]:
+        return [0.0, 1.0, 2.0, 0.0, 0.0, 0.0, 1.0]
+
+    def get_left_controller_pose(self) -> list[float]:
+        return [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+
+    def get_right_controller_pose(self) -> list[float]:
+        return [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+
+
+class FakeXrt(FakePoseXrt):
+    """Minimal stand-in for the XRoboToolkit SDK object."""
+
+    def get_time_stamp_ns(self) -> int:
+        return 111
+
+    def get_body_timestamp_ns(self) -> int:
+        return 222
+
+    def get_motion_timestamp_ns(self) -> int:
+        return 333
+
+    def get_body_joints_timestamp(self) -> list[int]:
+        return [444, 555]
+
+
+def test_quest3_sample() -> None:
+    """Quest 采集在 quest3 里：四个 SDK 时间戳，没有任何主机侧时刻。"""
+    reader = object.__new__(XrtReader)
+    reader.xrt = FakeXrt()
+    reader.errors = {}
+
+    sample = reader.collect_sample(9)
+
+    check("Quest 采集/sequence 原样带出", sample.get("sequence") == 9)
+    check(
+        "Quest 采集/四个 SDK 时间戳齐全",
+        sample.get("sdk_timestamp_ns") == 111
+        and sample.get("body_timestamp_ns") == 222
+        and sample.get("motion_timestamp_ns") == 333
+        and sample.get("body_joints_timestamp_ns") == [444, 555],
+        repr(
+            (
+                sample.get("sdk_timestamp_ns"),
+                sample.get("body_timestamp_ns"),
+                sample.get("motion_timestamp_ns"),
+                sample.get("body_joints_timestamp_ns"),
+            )
+        ),
+    )
+    check(
+        "Quest 采集/没有主机侧 received_at",
+        "received_at" not in sample,
+        repr(sorted(sample)),
+    )
+
+    row = quest_sample_to_row(sample, "head", "left")
+    check(
+        "Quest 采集/时间戳直接进 HDF5 行",
+        int(row["quest/sdk_timestamp_ns"]) == 111
+        and int(row["quest/body_timestamp_ns"]) == 222
+        and int(row["quest/motion_timestamp_ns"]) == 333
+        and int(row["quest/body_joints_timestamp_ns"][0]) == 444
+        and int(row["quest/body_joints_timestamp_ns"][1]) == 555
+        and int(row["quest/body_joints_timestamp_ns"][2]) == -1,
+    )
+
+    reader.xrt = FakePoseXrt()
+    empty = reader.collect_sample(10)
+    check(
+        "Quest 采集/SDK 不给时落 -1",
+        int(quest_sample_to_row(empty, "head", "left")["quest/body_timestamp_ns"])
+        == -1,
+    )
+
+
+def test_camera_monotonic(tmp_root: Path) -> None:
+    """WSL backend writes a monotonic column; Linux backend leaves it absent."""
+    from collect_cap import Hdf5Recorder
+
+    base = 1_700_000_000_000_000_000
+
+    # WSL backend: both columns
+    wsl_dir = tmp_root / "cam_wsl"
+    with Hdf5Recorder(wsl_dir, "head", "right", "right", ("cam0",), True) as rec:
+        info = rec.write_camera_timestamps(
+            "cam0",
+            [base, base + 33_000_000],
+            monotonic_ns=[10_000_000_000, 10_033_000_000],
+        )
+    with h5py.File(wsl_dir / "data.h5", "r") as f:
+        group = f["cameras/cam0"]
+        check(
+            "相机单调钟/wsl 两列都在",
+            "timestamp_unix_ns" in group and "timestamp_monotonic_ns" in group,
+            list(group.keys()),
+        )
+        check(
+            "相机单调钟/wsl monotonic 内容",
+            list(group["timestamp_monotonic_ns"][:])
+            == [10_000_000_000, 10_033_000_000],
+            str(list(group["timestamp_monotonic_ns"][:])),
+        )
+    check(
+        "相机单调钟/wsl manifest 标记",
+        info.get("monotonic_available") is True
+        and info.get("first_timestamp_monotonic_ns") == 10_000_000_000,
+        str(info),
+    )
+
+    # Linux backend: only unix, monotonic dataset must not exist
+    linux_dir = tmp_root / "cam_linux"
+    with Hdf5Recorder(linux_dir, "head", "right", "right", ("cam0",), True) as rec:
+        info = rec.write_camera_timestamps("cam0", [base, base + 33_000_000])
+    with h5py.File(linux_dir / "data.h5", "r") as f:
+        group = f["cameras/cam0"]
+        check(
+            "相机单调钟/linux 无 monotonic 列",
+            "timestamp_unix_ns" in group
+            and "timestamp_monotonic_ns" not in group,
+            list(group.keys()),
+        )
+    check(
+        "相机单调钟/linux manifest 标记",
+        info.get("monotonic_available") is False,
+        str(info),
+    )
+
+
+def test_two_row_axes(tmp_root: Path) -> None:
+    """手套 N 行、Quest Q 行，互不相等，各自独立。"""
+    output_dir = tmp_root / "axes"
+    cap_rows = 6
+    quest_rows = 4
+    base_unix_ns = 1_700_000_000_000_000_000
+
+    recorder = Hdf5Recorder(
+        output_dir,
+        "controller",
+        "right",
+        "right",
+        ("right_cam0", "right_cam1"),
+        True,
+    )
+    recorder.__enter__()
+    for index in range(cap_rows):
+        frame = make_frame(
+            base_unix_ns + index * 8_000_000,
+            6_300_000_000_000 + index * 8_000_000,
+        )
+        recorder.write_cap(snapshot_cap_frame(frame, True))
+    for index in range(quest_rows):
+        recorder.write_quest(
+            quest_sample_to_row(make_quest_sample(index), "controller", "right")
+        )
+
+    cam0 = [base_unix_ns + index * 40_000_000 for index in range(5)]
+    recorder.write_camera_timestamps("right_cam0", cam0)
+
+    verify = recorder.verify_rows()
+    check(
+        "两轴/行数自检通过",
+        verify["row_mismatch"] == []
+        and verify["cap_rows"] == cap_rows
+        and verify["quest_rows"] == quest_rows,
+        str(verify),
+    )
+    check(
+        "两轴/Quest 行数不等于手套行数",
+        verify["quest_rows"] != verify["cap_rows"],
+    )
+
+    broken = recorder.file["cap/encoder_raw"]
+    broken.resize((cap_rows + 2, broken.shape[1]))
+    after = recorder.verify_rows()
+    check(
+        "两轴/自检能发现 cap 错位并给出期望值",
+        any(
+            item["dataset"] == "cap/encoder_raw"
+            and item["rows"] == cap_rows + 2
+            and item["expected"] == cap_rows
+            for item in after["row_mismatch"]
+        ),
+        str(after["row_mismatch"]),
+    )
+    broken.resize((cap_rows, broken.shape[1]))
+
+    recorder.write_meta({"alignment": "none", "rows": cap_rows})
+    recorder.__exit__(None, None, None)
+
+    with h5py.File(output_dir / "data.h5", "r") as handle:
+        check(
+            "两轴/cap 主轴长度",
+            handle["cap/timestamp_unix_ns"].shape == (cap_rows,),
+        )
+        check(
+            "两轴/quest 主轴长度",
+            handle["quest/sdk_timestamp_ns"].shape == (quest_rows,),
+        )
+        check(
+            "两轴/quest 四列 SDK 时间戳都在",
+            all(
+                name in handle["quest"]
+                for name in (
+                    "sdk_timestamp_ns",
+                    "body_timestamp_ns",
+                    "motion_timestamp_ns",
+                    "body_joints_timestamp_ns",
+                )
+            )
+            and not any("host" in name for name in handle["quest"]),
+        )
+        check(
+            "两轴/quest 时间戳回读正确",
+            int(handle["quest/body_timestamp_ns"][1])
+            == 1_700_000_000_000_000_000 + 1_000_000 + 10
+            and handle["quest/body_joints_timestamp_ns"].shape
+            == (quest_rows, 24),
+        )
+        check(
+            "两轴/相机只有时间戳",
+            "timestamp_unix_ns" in handle["cameras/right_cam0"]
+            and "frame_index" not in handle["cameras/right_cam0"]
+            and handle["cameras/right_cam0/timestamp_unix_ns"].shape == (5,),
+        )
+        check(
+            "两轴/没有写任何配对结果",
+            not any(
+                key in handle["quest"]
+                for key in ("available", "skew_ns")
+            ),
+        )
+        check(
+            "两轴/cap 数值",
+            handle["cap/encoder_raw"][0].tolist() == [101, 102, 103, 104]
+            and handle["cap/resultant_force"][0, 0].tolist() == [0, 0, 0],
+        )
+        check(
+            "两轴/quest 数值",
+            handle["quest/pose_6d"][0].tolist()[:3] == [0.3, 1.2, 0.5]
+            and int(handle["quest/hand_right/joint_count"][0]) == 2,
+        )
+        check(
+            "两轴/分布力 gzip 且形状正确",
+            handle["cap/distribute_force"].compression == "gzip"
+            and handle["cap/distribute_force"].shape
+            == (cap_rows, len(CAP_SLOTS), CAP_MAX_POINTS, 3),
+        )
+        check(
+            "两轴/meta 属性为 JSON 字符串且声明不做对齐",
+            handle["meta"].attrs["alignment"] == '"none"'
+            and handle["meta"].attrs["rows"] == "6",
+            str(dict(handle["meta"].attrs)),
+        )
+
+
+def test_omit_distribution(tmp_root: Path) -> None:
+    output_dir = tmp_root / "omit"
+    recorder = Hdf5Recorder(
+        output_dir,
+        "controller",
+        "right",
+        "right",
+        (),
+        False,
+    )
+    recorder.__enter__()
+    frame = make_frame(1_700_000_000_000_000_000, 0)
+    recorder.write_cap(snapshot_cap_frame(frame, False))
+    recorder.__exit__(None, None, None)
+    with h5py.File(output_dir / "data.h5", "r") as handle:
+        check(
+            "--omit-distribution/无分布力数据集",
+            "cap/distribute_force" not in handle,
+        )
+        check(
+            "--omit-distribution/仍有有效点数",
+            handle["cap/distribute_counts"].shape == (1, 10)
+            and int(handle["cap/distribute_counts"][0].sum()) == 444,
+        )
+        check(
+            "--omit-distribution/无 quest 相机组",
+            "cameras" not in handle,
+        )
+
+
+def test_live_view_hook() -> None:
+    """Every recorded frame must reach the live view exactly once.
+
+    The view itself runs in a child process and is not exercised here; what
+    this locks down is the capture-side plumbing: one ``push`` per
+    ``write_cap``, and no push when ``--view`` is off.
+    """
+    import queue as queue_module
+    import time
+
+    class FakeRecorder:
+        pose_source = "head"
+        pose_side = "right"
+        joint_capacity = 26
+        quest_total = 0
+
+        def __init__(self) -> None:
+            self.hands: list[dict[str, int]] = []
+            self.quests = 0
+
+        def write_cap(self, hand: dict[str, int]) -> None:
+            self.hands.append(hand)
+
+        def write_quest(self, _row: dict[str, object]) -> None:
+            self.quests += 1
+
+        @property
+        def cap_total(self) -> int:
+            return len(self.hands)
+
+    class FakeHand:
+        def __init__(self, frames: Any) -> None:
+            self.frames = frames
+
+    class FakeQuest:
+        def drain(self) -> list[object]:
+            return []
+
+    class FakeView:
+        def __init__(self) -> None:
+            self.pushed = 0
+            self.dropped = 0
+
+        def push(self, _hand: dict[str, int]) -> None:
+            self.pushed += 1
+
+    def run(view: FakeView | None) -> FakeRecorder:
+        frames: queue_module.Queue[dict[str, int]] = queue_module.Queue()
+        for index in range(5):
+            frames.put({"index": index})
+        recorder = FakeRecorder()
+        STOP_EVENT.clear()
+        try:
+            pump_and_record(
+                recorder,  # type: ignore[arg-type]
+                FakeHand(frames),  # type: ignore[arg-type]
+                FakeQuest(),  # type: ignore[arg-type]
+                0,
+                deadline=time.monotonic() + 0.35,
+                view=view,
+            )
+        finally:
+            STOP_EVENT.clear()
+        return recorder
+
+    view = FakeView()
+    recorder = run(view)
+    check(
+        "实时视图/每帧推送一次",
+        view.pushed == 5 and len(recorder.hands) == 5,
+        f"push={view.pushed} rows={len(recorder.hands)}",
+    )
+
+    quiet = run(None)
+    check(
+        "实时视图/不开时不推送",
+        quiet.hands and len(quiet.hands) == 5,
+        f"rows={len(quiet.hands)}",
+    )
+
+
+def test_config_file(tmp_root: Path) -> None:
+    """配置文件只提供默认值，命令行必须优先。"""
+    path = tmp_root / "cfg.json"
+    path.write_text(
+        json.dumps(
+            {
+                "_注释": "以 _ 开头会被忽略",
+                "camera_mode": "cam1",
+                "hand_rate": "60",
+                "no_quest": True,
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    config = load_config_file(path)
+    check(
+        "配置/忽略下划线注释",
+        "_注释" not in config and len(config) == 3,
+        str(config),
+    )
+    check("配置/文件不存在返回空", load_config_file(tmp_root / "nope.json") == {})
+
+    parser = build_parser()
+    apply_config(parser, config, path)
+    args = parser.parse_args([])
+    check(
+        "配置/文件值生效且按类型转换",
+        args.camera_mode == "cam1"
+        and args.hand_rate == 60
+        and args.no_quest is True,
+        f"{args.camera_mode} {args.hand_rate!r} {args.no_quest!r}",
+    )
+    overridden = parser.parse_args(["--camera-mode", "both", "--hand-rate", "200"])
+    check(
+        "配置/命令行覆盖文件",
+        overridden.camera_mode == "both" and overridden.hand_rate == 200,
+    )
+
+    view_parser = build_parser()
+    apply_config(
+        view_parser,
+        {"view": True, "view_fps": 15, "view_video": False},
+        path,
+    )
+    view_args = view_parser.parse_args([])
+    check(
+        "配置/实时视图可默认打开",
+        view_args.view is True
+        and view_args.view_fps == 15.0
+        and view_args.view_video is False,
+        f"{view_args.view!r} {view_args.view_fps!r} {view_args.view_video!r}",
+    )
+    check(
+        "配置/实时视图命令行可关掉",
+        view_parser.parse_args(["--no-view"]).view is False,
+    )
+
+    for bad_config, label in (
+        ({"camera_mode": "video"}, "非法选项值"),
+        ({"nonexistent_key": 1}, "未知键"),
+        ({"no_quest": "yes"}, "布尔写成字符串"),
+    ):
+        raised = False
+        try:
+            apply_config(build_parser(), bad_config, path)
+        except RuntimeError:
+            raised = True
+        check(f"配置/{label}报错", raised)
+
+
+def test_camera_backend(tmp_root: Path) -> None:
+    """The two camera backends must produce different, correct commands."""
+    from unittest import mock
+
+    from camera_ffmpeg import FfmpegCamera, to_windows_path
+
+    check(
+        "相机后端/路径转 Windows",
+        to_windows_path("/mnt/c/a/b.mkv") == "C:\\a\\b.mkv"
+        and to_windows_path("/dev/video0") == "/dev/video0",
+        to_windows_path("/mnt/c/a/b.mkv"),
+    )
+
+    linux_cam = FfmpegCamera(
+        "cam0", "/dev/video0", tmp_root, 1280, 720, 30.0, "copy",
+        "/usr/bin/ffmpeg", backend="linux",
+    )
+    linux_cmd = linux_cam.command()
+    check(
+        "相机后端/linux 用 v4l2 与墙钟",
+        "v4l2" in linux_cmd
+        and "-use_wallclock_as_timestamps" in linux_cmd
+        and "/dev/video0" in linux_cmd
+        and not any("dshow" in part for part in linux_cmd),
+        " ".join(linux_cmd[:6]),
+    )
+
+    with mock.patch(
+        "camera_ffmpeg.find_windows_ffmpeg", return_value="C:\\ffmpeg.exe"
+    ):
+        wsl_cam = FfmpegCamera(
+            "cam0", "video=@device_pnp_A", tmp_root, 1280, 720, 30.0, "copy",
+            "/usr/bin/ffmpeg", backend="wsl", windows_ffmpeg="C:\\ffmpeg.exe",
+        )
+    wsl_cmd = wsl_cam.command()
+    check(
+        "相机后端/wsl 用 dshow 且不用墙钟参数",
+        "dshow" in wsl_cmd
+        and "-use_wallclock_as_timestamps" not in wsl_cmd
+        and "-nostdin" not in wsl_cmd
+        and "video=@device_pnp_A" in wsl_cmd,
+        " ".join(wsl_cmd[:6]),
+    )
+    check(
+        "相机后端/wsl 输出路径是 Windows 格式",
+        any(part.startswith("C:\\") for part in wsl_cmd),
+        " ".join(part for part in wsl_cmd if ":" in part),
+    )
+
+    wsl_args = build_parser().parse_args(
+        ["--camera-backend", "wsl", "--camera-0", "video=@device_pnp_A"]
+    )
+    from collect_cap import resolve_camera_devices
+
+    devices = resolve_camera_devices(wsl_args, ("cam0",), ["video=@device_pnp_A"])
+    check(
+        "相机后端/wsl 设备名不被当路径改写",
+        devices["cam0"] == "video=@device_pnp_A",
+        devices["cam0"],
+    )
+
+    default_args = build_parser().parse_args([])
+    check(
+        "相机后端/默认 linux",
+        default_args.camera_backend == "linux",
+        default_args.camera_backend,
+    )
+
+
+def test_visualize_video(tmp_root: Path) -> None:
+    """Camera track offsets and the video transcode failure path.
+
+    The browser panel trusts ``offset_s`` blindly, so a sign error or a wrong
+    reference clock would silently shift every clip by the wrong amount.
+    """
+    out = tmp_root / "viz_video"
+    (out / "cameras").mkdir(parents=True, exist_ok=True)
+    glove_unix = 1_700_000_000_000_000_000
+    count = 300
+    stamps = glove_unix - 1_340_000_000 + np.arange(count, dtype=np.int64) * 33_366_667
+    with h5py.File(out / "data.h5", "w") as handle:
+        handle.create_group("cap")["timestamp_unix_ns"] = np.array([glove_unix])
+        cam = handle.create_group("cameras/right_cam0")
+        cam["timestamp_unix_ns"] = stamps
+
+    handle = h5py.File(out / "data.h5", "r")
+    tracks = camera_tracks(handle, out, glove_unix)
+    handle.close()
+    check("视频/识别出一路相机", len(tracks) == 1, str(tracks))
+    if not tracks:
+        return
+    track = tracks[0]
+    check(
+        "视频/首帧偏移带符号且相对手套首帧",
+        abs(track["offset_s"] + 1.34) < 1e-6,
+        str(track["offset_s"]),
+    )
+    check("视频/帧数与 h5 一致", track["frames"] == count, str(track["frames"]))
+    check(
+        "视频/帧率由时间轴算出",
+        29.5 <= track["fps"] <= 30.5,
+        str(track["fps"]),
+    )
+    check("视频/mkv 缺失时置空", track["mkv"] is None, str(track["mkv"]))
+
+    # A missing mkv must be reported, not raised: the html still has to build.
+    error = build_preview(track, out / "preview", 320, 28, "/nonexistent/ffmpeg")
+    check("视频/缺 mkv 时给出原因", error == "找不到 mkv", str(error))
+
+    (out / "cameras" / "right_cam0.mkv").write_bytes(b"not really a video")
+    handle = h5py.File(out / "data.h5", "r")
+    track = camera_tracks(handle, out, glove_unix)[0]
+    handle.close()
+    check("视频/mkv 存在时给路径", bool(track["mkv"]), str(track["mkv"]))
+
+    payload = {"video": {"cams": [track]}, "warnings": []}
+    args = types.SimpleNamespace(ffmpeg="/nonexistent/ffmpeg", video_width=320, video_crf=28)
+    prepare_videos(payload, out, args)
+    check("视频/ffmpeg 缺失不抛异常", track["file"] is None, str(track["file"]))
+    check("视频/ffmpeg 缺失写入警告", bool(track["error"]), str(track["error"]))
+    check(
+        "视频/转码失败进 warning 列表",
+        any("转码失败" in text for text in payload["warnings"]),
+        str(payload["warnings"]),
+    )
+
+
+def test_camera_preview(tmp_root: Path) -> None:
+    """Live preview: the MJPEG splitter and the extra ffmpeg output.
+
+    The splitter runs on a raw pipe with no framing, so a bug here shows up as
+    a frozen or garbage thumbnail, never as an exception.
+    """
+    from unittest import mock
+
+    from camera_ffmpeg import FfmpegCamera, extract_jpeg_frames
+
+    frame_a = b"\xff\xd8AAA\xff\xd9"
+    frame_b = b"\xff\xd8BBBB\xff\xd9"
+    buffer = bytearray(b"junk" + frame_a + frame_b + b"\xff\xd8PART")
+    frames = extract_jpeg_frames(buffer)
+    check("实时预览/拆出两个完整 JPEG", frames == [frame_a, frame_b], str(frames))
+    check("实时预览/半个帧留在缓冲区", bytes(buffer) == b"\xff\xd8PART", bytes(buffer))
+    check(
+        "实时预览/拆干净后缓冲区为空",
+        extract_jpeg_frames(bytearray(frame_a)) == [frame_a],
+    )
+    leftover = bytearray(b"\x00\x01noise")
+    check(
+        "实时预览/没有 SOI 的垃圾被丢掉",
+        extract_jpeg_frames(leftover) == [] and not leftover,
+        str(leftover),
+    )
+
+    quiet = FfmpegCamera(
+        "cam0", "/dev/video0", tmp_root, 1280, 720, 30.0, "copy",
+        "/usr/bin/ffmpeg", backend="linux",
+    )
+    check(
+        "实时预览/关掉时没有第二路输出",
+        "image2pipe" not in quiet.command() and "pipe:1" not in quiet.command(),
+        " ".join(quiet.command()),
+    )
+
+    with mock.patch(
+        "camera_ffmpeg.find_windows_ffmpeg", return_value="C:\\ffmpeg.exe"
+    ):
+        live = FfmpegCamera(
+            "cam0", "video=@device_pnp_A", tmp_root, 1280, 720, 30.0, "copy",
+            "/usr/bin/ffmpeg", backend="wsl", windows_ffmpeg="C:\\ffmpeg.exe",
+            preview_fps=5.0, preview_width=360,
+        )
+    command = live.command()
+    check(
+        "实时预览/开启后多一路 image2pipe",
+        "image2pipe" in command and "pipe:1" in command,
+        " ".join(command[-8:]),
+    )
+    check(
+        "实时预览/抽帧与缩放写进 -vf",
+        any("fps=5,scale=360:-2" in part for part in command),
+        " ".join(command),
+    )
+    check(
+        "实时预览/主输出仍在（mkv 路径没被顶掉）",
+        any(part.endswith(".mkv") for part in command),
+        " ".join(command),
+    )
+    check(
+        "实时预览/预览不占默认值",
+        FfmpegCamera(
+            "cam0", "/dev/video0", tmp_root, 1280, 720, 30.0, "copy",
+            "/usr/bin/ffmpeg", backend="linux",
+        ).preview_fps == 0.0,
+    )
+
+
+def test_misc() -> None:
+    check("杂项/ffprobe 帧率解析", parse_rate("30/1") == 30.0 and parse_rate("x") == 0.0)
+    parser = build_parser()
+    check(
+        "杂项/阈值参数已移除",
+        not any("--max-skew-ms" in action.option_strings for action in parser._actions)
+        and not any(
+            "--camera-max-skew-ms" in action.option_strings
+            for action in parser._actions
+        ),
+    )
+
+
+def test_visualize(tmp_root: Path) -> None:
+    """Replay payload: peak-preserving thinning, clock drift, empty-glove flags."""
+    rows = 1200
+    smooth = np.sin(np.linspace(0.0, 6.0, rows))
+    index = take_envelope(rows, 300, [smooth])
+    check("可视化/保峰抽稀不超预算", index.size <= 300, f"实际 {index.size}")
+    check("可视化/保峰抽稀索引严格递增", bool(np.all(np.diff(index) > 0)))
+
+    spike = np.zeros(rows)
+    spike[731] = 99.0
+    thin = take_envelope(rows, 200, [spike])
+    check(
+        "可视化/保峰抽稀保住单帧尖峰",
+        731 in set(int(v) for v in thin),
+        f"共 {thin.size} 点",
+    )
+    check(
+        "可视化/短录制原样返回",
+        np.array_equal(take_envelope(50, 4000, [np.zeros(50)]), np.arange(50)),
+    )
+
+    out = tmp_root / "viz"
+    out.mkdir(parents=True, exist_ok=True)
+    count = 400
+    mono = 6_300_000_000_000 + np.arange(count, dtype=np.int64) * 8_333_333
+    unix = 1_700_000_000_000_000_000 + (mono - mono[0])
+    unix[count // 2:] += 2_201_000_000  # one 2.2 s wall-clock step mid-run
+    with h5py.File(out / "data.h5", "w") as handle:
+        group = handle.create_group("cap")
+        group["timestamp_unix_ns"] = unix
+        group["timestamp_monotonic_ns"] = mono
+        group["joint_angles_deg"] = np.zeros((count, 4))
+        group["resultant_force"] = np.zeros((count, len(CAP_SLOTS), 3), dtype="int16")
+        group["distribute_counts"] = np.full(
+            (count, len(CAP_SLOTS)), 30, dtype="uint32"
+        )
+        group["distribute_force"] = np.zeros(
+            (count, len(CAP_SLOTS), CAP_MAX_POINTS, 3), dtype="int16"
+        )
+
+    quality = clock_quality(h5py.File(out / "data.h5", "r"), count)
+    check(
+        "可视化/时钟跳变被统计",
+        quality is not None and quality["steps_over_10ms"] == 1,
+        str(quality),
+    )
+    check(
+        "可视化/跳变幅度正确",
+        quality is not None and 2000.0 <= quality["max_step_ms"] <= 2400.0,
+        str(quality),
+    )
+
+    payload = collect_payload(out, 4000, 200, False)
+    meta = payload["meta"]
+    check("可视化/空负载被标记", meta["force_all_zero"] is True)
+    check(
+        "可视化/空负载给出警告",
+        any("全为 0" in text for text in payload["warnings"]),
+        str(payload["warnings"]),
+    )
+    check("可视化/未抽稀时标记 none", meta["thinning"] == "none", str(meta["thinning"]))
+    check("可视化/载荷含四路关节角标签", len(payload["cap"]["angle_labels"]) == 4)
+
+
+def main() -> int:
+    tmp_root = Path(tempfile.mkdtemp(prefix="paxini-cap-selftest-"))
+    try:
+        test_frame_parsing()
+        test_quest3_sample()
+        test_quest_row()
+        test_two_row_axes(tmp_root)
+        test_omit_distribution(tmp_root)
+        test_live_view_hook()
+        test_camera_monotonic(tmp_root)
+        test_config_file(tmp_root)
+        test_camera_backend(tmp_root)
+        test_camera_preview(tmp_root)
+        test_visualize(tmp_root)
+        test_visualize_video(tmp_root)
+        test_misc()
+    finally:
+        shutil.rmtree(tmp_root, ignore_errors=True)
+
+    for name in PASSED:
+        print(f"[通过] {name}")
+    for name in FAILED:
+        print(f"[失败] {name}")
+    print(f"\n合计 {len(PASSED) + len(FAILED)} 项：通过 {len(PASSED)}，失败 {len(FAILED)}")
+    return 0 if not FAILED else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

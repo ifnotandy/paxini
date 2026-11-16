@@ -1,0 +1,51 @@
+# ============================================
+# Paxini 项目统一版本库
+# 大体积二进制与采集数据不入库，安装包放 GitHub Release
+# ============================================
+
+# ---------- 采集数据 / 录像（体积极大，仅保留本地）----------
+厂商数据采集/
+**/recordings/
+*.mkv
+*.mp4
+
+# ---------- 厂商安装包与二进制（改放 GitHub Release）----------
+*.deb
+*.apk
+*.tar.gz
+*.whl
+*.exe
+*.so
+*.so.*
+sdk/**/*.deb
+sdk/**/*.apk
+sdk/**/*.tar.gz
+sdk/ffmpeg-win/*.exe
+
+# ---------- deb 解包目录（含 Windows 无法解析的符号链接）----------
+厂商资料/**/pxcap-studio_1.0.0_amd64/
+厂商资料/**/pxhandsdk_1.0.0.0.ubuntu2204_amd64/
+厂商资料/**/pxhandsdk_1.0.0.24.ubuntu2204_arm64/
+
+# ---------- 大体积构建日志 ----------
+**/export.log
+
+# ---------- Python ----------
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# ---------- 本地设备配置 / 密钥 ----------
+**/.quest_ip
+.env
+.env.*
+!.env.example
+
+# ---------- 编辑器 ----------
+.idea/
+.vscode/
+*.swp
+*~
+.Thumbs.db
+desktop.ini

@@ -1,0 +1,549 @@
+# PXCap III + Quest 3 + 双路相机采集
+
+一只 PXCap III 数据手套有一个串口、没有电机。程序连接手套、读取设备信息，然后启动
+SDK 连续采集回调；同时用 ffmpeg 直采两路 UVC 相机，并把 Quest 3 的样本一起写进
+**单个 HDF5**。
+
+**这个工程只负责采集，不做任何对齐。** 三个来源各写各的、各带自己的时间戳，
+谁跟谁配、按什么阈值配，留给下游处理工程（见 `../DOC/待验证清单.md` 与待建的
+`Paxini-Align/`）。这样采集端不会替下游做决定，也不会因为推断错而污染原始数据。
+
+**采集端也不碰像素、不做标定**：没有 OpenCV，没有内参/外参，`meta/` 里没有标定出处。
+所以这套数据能做"随时间变化"的分析，做不了任何"距离/位置/三维"的判断 ——
+缺的四组量与补齐计划见 [`../DOC/标定.md`](../DOC/标定.md) §2。
+
+**手套零点标定是独立工具，不在采集主循环里**：`hand_calib.py` 走 SDK 的
+`set_encoder_calibration` / `set_sensor_calibration`，把零点写进手套存储（设备端持久化，
+不是主机侧修正），带静止/空载闸门与标零后复读验证。用法与判据见
+[`../DOC/标定.md`](../DOC/标定.md) §1。
+
+相机不用 OpenCV：`cap.read()` 只能拿到"调用返回时刻"，帧在驱动队列里等了多久未知；
+ffmpeg 让每帧 pts 直接取主机墙钟并原样写进容器，停止后用 `ffprobe` 回读。
+
+> 接手这个仓库（人或 AI）先看根目录 [`../README.md`](../README.md) 的 **§0 接手必读**：
+> 里面有代码地图、不能违反的约定、环境坑和提交前必过的三关。本文件讲怎么用，
+> 根 README §0 讲怎么改。
+
+## 1. 快速开始
+
+```bash
+cd Paxini-Cap/Cap_Quest
+export PATH="$HOME/bin:$PATH"          # 静态版 ffmpeg/ffprobe
+python3.10 collect_cap.py --list-devices
+```
+
+`--list-devices` 打印串口（含 USB VID:PID 与 by-id）、V4L2 采集节点和 ffmpeg 版本。
+确认手套串口那行末尾是 `PXCap`（`USB=28e9:018a`）后再运行：
+
+```bash
+python3.10 collect_cap.py --cap-side right --pose-source controller --pose-side right
+```
+
+常见变体：
+
+```bash
+python3.10 collect_cap.py --duration 60        # 采 60 秒后自动停
+python3.10 collect_cap.py --camera-mode cam0   # 只录一路，排除带宽问题
+python3.10 collect_cap.py --no-quest           # 没有头显时只采手套 + 相机
+python3.10 collect_cap.py --camera-mode none   # 不录视频
+```
+
+启动顺序（任一环节失败都在开始采集前退出，不留半截数据）：
+
+```text
+串口识别（USB 28e9:018a）
+→ ADB 启动 Quest APK
+→ 收到连续 3 次有效 Quest pose
+→ 每路相机连续 3 帧出图
+→ 启动手套连续采集
+```
+
+`--skip-adb` 可跳过 ADB，但必须自己先打开 XRoboToolkit 并开启 Tracking 和 Send。
+
+#### 一键脚本（无 Quest 版）
+
+`run_capture_noquest.sh` 把「找 ffmpeg → 查串口 → 关 NTP → 起采集 → 读 manifest
+核对行数」串成一条命令，**固定带 `--no-quest`**，只适用于"手套 + 双路相机、没有头显"
+的场景。有头显时仍直接跑 `collect_cap.py`。
+
+```bash
+bash run_capture_noquest.sh                  # 一直采，Ctrl+C 停（只按一次）
+bash run_capture_noquest.sh -d 60            # 采 60 秒
+bash run_capture_noquest.sh -d 60 --view     # 边采边看
+bash run_capture_noquest.sh -d 10 --dry-run  # 只做检查并打印命令，不启动
+bash run_capture_noquest.sh -- --video-codec h264   # 其余参数写在 -- 之后透传
+```
+
+它比手工敲多了四层保护：找不到 `python3.10`/`PXCap3`、找不到 `ffmpeg` 或 `ffprobe`、
+WSL 里没有 `/dev/ttyACM0`、`camera_backend: wsl` 却没有 `ffmpeg.exe`，都会在启动前停下
+并给出该输入的命令；跑完自动打印帧数、实际帧率、视频体积与 `verify.row_mismatch`，
+校验不过退出码为 3（区别于环境问题的 2）。
+
+串口那一步会**自己重连**：WSL 发行版空闲约 60 秒（`vmIdleTimeout` 默认值）就会关闭，
+usbipd 的 attach 随之失效，而 `usbipd list` 仍显示 `Attached`。脚本不看状态列，只判断
+`/dev/ttyACM0` 在不在；不在就 `detach` → `attach` → 轮询节点最多 3 秒，最多试 5 轮。
+`detach` 之后设备会重新枚举，紧接着 `attach` 会报 `There is no device with busid`，
+所以必须先重试而不是判一次就放弃。busid 从 `usbipd list` 里按 `28e9:018a` 自动查，
+换机器或换 USB 口不用改脚本；要指定就 `USBIPD_BUSID=3-3 bash run_capture_noquest.sh`。
+
+脚本不写 `~/bin` 这种个人路径：ffmpeg 按 `$FFMPEG` → `PATH` → `~/bin`、`/usr/local/bin`
+等常见位置查找，找到后把它的目录加到 `PATH` 最前面，`ffprobe` 优先取同目录的那份。
+
+#### 换一台机器要改什么
+
+代码里的路径都相对**脚本所在目录**解析（`cap_config.json`、`recordings/`、
+`../sdk/ffmpeg-win/`），所以只要仓库结构不变就不用改代码。真正会挡住别人的是四件事：
+
+| 项 | 本机现状 | 别人怎么办 |
+|---|---|---|
+| Python | 系统 `python3` 是 3.12，`PxCap3` 只在 `python3.10` 里 | 用 `python3.10`（或 `PYTHON=` 指定） |
+| 手套 SDK | `pxhandsdk 1.0.0.0` 已 `dpkg` 装 | 装 SDK + `setup-serial-access.sh` + 重登让 `dialout` 生效 |
+| 相机后端 | `cap_config.json` 写死 `"camera_backend": "wsl"` | 原生 Linux 主机改成 `"linux"`，否则会去找 Windows 的 `ffmpeg.exe` |
+| `ffmpeg.exe` | `sdk/ffmpeg-win/ffmpeg.exe`，**不入库** | 从 `sdk/README.md` 给的地址下载，或改用 `linux` 后端 |
+
+另外 `usbipd attach --busid 3-3` 里的 `3-3` 是本机总线号，换机器会变——脚本已经改成按
+`28e9:018a` 自动查，手工敲则要先 `usbipd list`；DirectShow 设备名带 PnP 实例 ID
+（`vid_0c45&pid_000c...`），本程序每次自己枚举，换 USB 口不用改配置。
+
+## 2. 时间戳
+
+三个来源各自打点，**互不配对**：
+
+| 来源 | 打的什么 | 存在哪 |
+|---|---|---|
+| 手套 | SDK 每帧给 `timestamp_unix_ns` + `timestamp_monotonic_ns` | `cap/` 两列 |
+| Quest | SDK 给四个：`sdk_` / `body_` / `motion_` / `body_joints_timestamp_ns` | `quest/` 四列 |
+| 视频 | linux 后端：ffmpeg `-use_wallclock_as_timestamps 1` + `-copyts`；wsl 后端：`epoch_unix_ns` + DirectShow 相对 pts | `cameras/<id>/timestamp_unix_ns` |
+
+- 手套 120 Hz（`--hand-rate`，上限 300），Quest 轮询 120 Hz（`--quest-rate`）。
+- 相机默认 30 fps；**每路帧数 M 与手套帧数 N、Quest 行数 Q 互不相等**。
+- 相机时间戳只能是墙钟：V4L2 的时钟类型由驱动声明、ffmpeg 丢掉该标记，无法指定
+  也无法确证，所以不做推断（细节见 `../DOC/HDF5结构说明.md` §5.1）。
+
+时钟域、换算公式、四个坑，全部整理在 [`../DOC/时间戳说明.md`](../DOC/时间戳说明.md)。
+
+### 墙钟跳变（务必看）
+
+手套的 `timestamp_unix_ns` 和 ffmpeg 的 pts 都是墙钟，会被校时 step 改写——NTP
+守护进程、虚拟化层的宿主时间同步都做这件事，开机、休眠唤醒、偏移超阈值时都可能
+触发。本机实测采集期间出现过 **2~5 秒**的多次跳变。Quest 那四个值不受影响，因为
+还不知道它们属于哪种钟（见 §2 与待验证清单 C8）。
+
+采集端**不再检测也不再修正**：原始时间戳原样落盘，跳没跳由下游判断（对比同一台
+机器的 `timestamp_unix_ns` 与 `timestamp_monotonic_ns` 即可看出）。想少踩这个坑：
+
+```bash
+sudo timedatectl set-ntp false      # 采完再 set-ntp true
+```
+
+数据集要求严格时别在 WSL 里采，原生 Linux 上这个问题基本不存在。
+
+## 3. Quest 数据
+
+`quest/pose_6d` 是**选定**的主位姿，顺序 `x, y, z, qx, qy, qz, qw`，米 + 四元数
+`xyzw`，坐标系是 XRoboToolkit 的 Unity tracking-origin（`+X` 右、`+Y` 上、`+Z` 前，
+左手系）。默认 `--pose-source controller --pose-side right`。
+
+其余字段把整个样本都存下来，不受 `--pose-source` 影响。**一次轮询 = 一行**，
+没采到就是没有这一行。
+
+四列时间戳都是 SDK 给的，我们不再追加主机侧读数。因为 `sdk_timestamp_ns` 的
+时钟域官方没写，所以不能直接和手套的单调钟相减——先验证域，再谈对齐。
+
+四个值连同位姿、按键一起在 `quest3.py` 的 `XrtReader.collect_sample()` 里取好并
+返回；`collect_cap.py` 的 `QuestPoller` 只入队、只写行，不调 SDK getter。
+**要加/改 `quest/` 的时间列，改 `quest3.py`。**
+
+## 4. 输出
+
+```text
+recordings/data_<YYYYMMDD>_<当天序号>/
+├── data.h5
+├── manifest.json
+└── cameras/
+    ├── right_cam0.mkv  right_cam0.log  right_cam0.progress
+    └── right_cam1.mkv  right_cam1.log  right_cam1.progress
+```
+
+`.log` 是 ffmpeg 的 stderr，`.progress` 是 `-progress` 输出，都用来看相机是否真的
+在出帧，可以删。
+
+### 4.1 `data.h5`
+
+三条独立行轴：`cap`（N）、`quest`（Q）、`cameras/*`（M）。视频像素在 mkv 里，
+HDF5 只存索引性质的时间戳。
+
+> 完整目录树、逐字段含义（单位/顺序/缺失语义）、读法示例见
+> [`../DOC/HDF5结构说明.md`](../DOC/HDF5结构说明.md)。
+
+### 4.2 `manifest.json`
+
+关键字段：
+
+| 字段 | 内容 |
+|---|---|
+| `rows` / `quest_rows` | 手套帧数 N / Quest 样本数 Q |
+| `actual_rate_hz` | 按首末帧**单调钟**跨度算的实际频率 |
+| `duration_s` / `sample_span_s` | 墙钟耗时 / 手套首末帧跨度 |
+| `alignment` | 固定 `none (raw per-source timestamps only)` |
+| `hand` | 串口、SN、SDK/固件版本、故障、回调耗时、队列溢出 |
+| `quest` | enabled、rows、samples_dropped、轮询次数与超时 |
+| `cameras` | 每路设备、帧数、分辨率、实际 fps、时间窗、错误 |
+| `verify` | 行数自检（`row_mismatch` 必须为空） |
+| `env` | python / numpy / h5py / ffmpeg 版本 |
+
+`verify.row_mismatch` 非空说明某组数据集首维和自己的行数不一致，这种文件能打开，
+但下游按行取数会整体错位。
+
+### 4.3 回放
+
+`visualize.py` 直接读采集目录，不需要重新解码视频：
+
+```bash
+python3.10 visualize.py recordings/data_<日期>_<序号>          # Tk 窗口
+python3.10 visualize.py recordings/data_<日期>_<序号> --html   # 导出 viewer.html
+python3.10 visualize.py recordings/data_<日期>_<序号> --save-png run.png
+```
+
+- 窗口里三张曲线（关节角 / 合力模长 1~5 路 / 合力模长 6~10 路）+ 右侧一张
+  **10 路合力数值表**，共用一条时间轴；空格播放，`←` `→` 逐帧，点曲线跳转，底部滑块可拖
+- 浏览器版另有一个倍速按钮，在 1.0× → 2.0× → 0.50× → 0.25× 之间循环；播到末尾自动
+  停在最后一帧，再按空格从头开始
+- 浏览器版把鼠标移到曲线上会出虚线游标 + 数值提示框（该时刻的时间、帧号和该图前 6 条
+  曲线的值），不用再靠滑块一点点拖去找某个尖峰
+- 顶部信息条除了时长/帧数/速率，还给出**保峰抽稀比例**与**时钟漂移**（`unix − monotonic`
+  的首末差、>10 ms 的跳变次数）；有跳变时同时弹一条警告
+- `--html` 导出 `viewer.html`，手套/Quest 数据内嵌，双击就能看，方便发给别人；视频除外
+  —— 转码后的 mp4 放在同级的 `preview/` 下，拷给别人时要连目录一起拷
+- `--save-png` 用 Agg 渲染首帧，无显示器也能出图
+
+#### 视频面板（只做浏览器版）
+
+`--html` 默认把每路相机 mkv 转成 `preview/<cam>.mp4`，挂在曲线下方，和手套时间轴
+联动；`--no-video` 关掉，`--video-width`（默认 640）、`--video-crf`（默认 26）和
+`--ffmpeg` 可调。
+
+- **必须转码**：Chrome/Edge 不认 Matroska，mkv 里又是 MJPEG，只有 h264 的 mp4 才进得
+  了 `<video>`。命令里带 `-fps_mode passthrough`（保住原始帧间隔，掉帧不会被 CFR 抹掉）
+  和 `-g 15`（每半秒一个关键帧，拖动才不卡）
+- **对齐怎么算**：相机首帧的 `timestamp_unix_ns` 减手套首帧 unix 得到 `offset_s`
+  （面板上显示成「首帧 −1.48 s」），视频时间 = 手套相对时间 − offset。每个手套帧 seek
+  到**最近一帧的中点**，误差因此不超过半帧（30 fps 即 ±17 ms）。映射按**时间**而不是
+  帧序号，所以相机掉帧也不会让后面的对齐越飘越远
+- **联动**：播放/暂停/倍速/逐帧/点曲线跳转都会同步；暂停时视频一起停住，不会自己往下跑
+- **实测成本**：15 s 双路 720p（mkv 各 31 MB）→ 两个 mp4 共 1.1 MB，转码 + 出 html
+  合计 2.5 s。默认 640 宽、crf 26，够看清手指动作
+- **Tk 窗口没有视频**，只有浏览器版有；实时视图另算（见 4.4）
+
+#### 布局与滚动
+
+页面是「左列三张曲线、右列当前帧 + 合力表、视频条在最下」，三块都不写死像素：
+
+- **分布力有效点数那张图删掉了。** 它和合力模长讲的几乎是同一件事（点数非零即受力），
+  十几条曲线挤在一张 150 px 高的图里谁也认不出来，所以拿掉，位置让给下面那条
+- **合力模长拆成两张**：`合力模长 A` 画 1~5 路、`合力模长 B` 画 6~10 路，各自 5 条线
+  一套图例。5 条比 10 条稀一半，图例也能一眼对上曲线
+- **10 路合力表在右列**（约 470 px 宽，占两行高），六列：槽位 / Fx / Fy / Fz / |F| /
+  点数；`table-layout: fixed` + `height: 100%`，11 行（10 路 + 合计）均分整个面板高度，
+  不会在表格下面留一条空带。数值右对齐、等宽数字，合计行用琥珀色并加分隔线。力值按
+  **N** 显示两位小数（文件里存的 0.1 N 整数 ÷10，等值无损）；整数显示会把 `|F|` 的
+  1.73 舍成 2，小力段误差能到 15%，也看不出 0.2 N
+- **当前帧卡片**：4 路关节角的小表（关节 / deg）+ 一行**合力合计**（Fx/Fy/Fz/|F|/点数）
+  + 帧号、时间与速率
+- **视频条自适应**：`repeat(auto-fit, minmax(320px, 1fr))`，宽屏两路并排、窄屏自动落成
+  一列；每路 `width: 100%`、`object-fit: contain`，单图最宽 900 px，既不会拉伸变形，
+  也不会在宽屏上只占中间一小块
+- **页面可以滚动**：`#grid` 最小高度 `max(520px, 100vh − 108px)`，一屏够高时正好撑满、
+  不够高时才出滚动条；底栏 `position: sticky` 常驻底部，`main` 底部留 70 px 空白，
+  滚到底也不会被播放条压住
+
+2026-11-13 实测（1024~1920 三档视口）全程无横向溢出、无遮挡，逐档尺寸见
+[`../DOC/待验证清单.md`](../DOC/待验证清单.md) F9。
+
+> 把采集目录用 `python -m http.server` 挂出去看时，浏览器拿不到 Range 响应，`<video>`
+> 会变成**不可 seek**（`seekable` 为空），只能从头播。直接双击 `viewer.html`，或者用
+> 支持 Range 的服务器。
+
+> **手套没戴、手指没施力时合力表整张是 0。** 2026-11-13 实测：空负载下
+> `distribute_force` 最大 0、非零占比 **0.0%**，`joint_angles_deg` 只在 −0.04~0.13°，
+> `resultant_force` 三轴全 0。此时曲线是噪声底、数值表全是 0，**这是数据本身为零，
+> 不是渲染 bug**。正式采集务必让手指真的受力，否则回放看不出任何信息。
+
+横轴默认用 `cap/timestamp_monotonic_ns`，没有就退回墙钟并提示倒退处数。曲线超过
+`--max-points`（默认 4000）会**保峰抽稀**：每段的极小值和极大值都保留，所以单帧尖峰
+不会因为抽稀而消失（12000 帧 → 2563 帧，13 个单帧尖峰一个不丢）；合力表默认最多留
+600 帧（`--dist-frames`），按等间隔取，播放时取时间上最近的那一帧。
+**Quest 与手套仍是两条轴**，这里不做配对，只是各自显示。
+
+### 4.4 实时视图
+
+采集时加 `--view`，边录边看：
+
+```bash
+python3.10 collect_cap.py --cap-side right --view                    # auto：按系统自己选
+python3.10 collect_cap.py --cap-side right --view --view-mode html   # 强制浏览器版
+python3.10 collect_cap.py --cap-side right --view --view-mode tk     # 强制 matplotlib 窗口
+```
+
+**`--view-mode auto`（默认）按平台落点：**
+
+| 环境 | 落点 | 原因 |
+|---|---|---|
+| WSL（WSLg） | `html` | WSLg 没有窗口管理器：Tk 窗口会被摆在屏幕右下、比屏幕还高，底部相机行出屏；被盖住后任务栏那条带 `[WARN:COPY MODE]` 前缀的条目也拉不回来 |
+| 原生 Linux（X11 / Wayland） | `tk` | 有正常 WM，窗口该多大就多大、任务栏能点击还原，窗口版更省事，不用切浏览器 |
+
+判断方式是环境变量 `WSL_DISTRO_NAME` 或 `/mnt/wslg` 是否存在（见
+`live_view.running_under_wslg()`）。两种模式的内容完全一样，只是壳不同。
+
+**`html` 模式**：启动时打印 `http://127.0.0.1:8765/`（端口被占自动顺延），页面每 150 ms
+拉一次 `/state`，两路相机走 MJPEG（`/cam/<id>`），`age_s` 超过 2 s 会显示"数据停了"。
+可以拖到第二块屏、随便缩放，关掉页面不影响录制。
+
+**`tk` 模式**：matplotlib 独立窗口，按屏幕尺寸自算位置与大小；关窗或按 `q` 只关视图。
+
+**两种模式里都没有曲线，只有数字**：左边 4 路磁编码器关节角（30 pt 大字，一眼看出戴没戴正），
+右边 **10 路合力数值表**（槽位 / Fx / Fy / Fz / |F| / 点数 + 合计，两位小数 N），开了相机
+的话再加一排**相机关键帧**。采集时人要盯的是"姿势对不对、力施加了没有"，一个滚动 6 秒
+就跑完的曲线不如一个大数字直接；曲线留给回放页慢慢看。
+
+**`tk` 模式跑在一个 fork 出来的子进程里。** 采集主循环每帧只做一次 `norm` 加一次
+`queue.put_nowait`，实测 **130 µs**（p99 262 µs），占 120 Hz 下 8.3 ms 预算的 1.6%。
+绘制、Tk 事件循环、字体渲染全在子进程：
+
+- 子进程跟不上时丢帧，队列上限 240 帧（约 2 秒），`dropped` 会记下来，结束时打印
+- 关窗或按 `q` 只关视图，录制继续
+- 视图崩溃不影响录制，`push` 发现子进程已死就直接返回
+- 子进程忽略 SIGINT，Ctrl+C 只作用于采集端
+
+`html` 模式同样 fork 一个子进程：父进程每帧只做一个 `put_nowait`（小元组 + 最多两路 JPEG），
+HTTP 服务、页面、JPEG 缓冲、MJPEG 连接全在子进程里。两处细节：
+
+- **端口由子进程绑、再用 pipe 报回父进程**，所以启动日志里的 URL 一定是真实端口
+  （8765 被占时自动顺延，不会出现"日志写 8765、实际 8766"）
+- 子进程挂了或被杀，`push` 发现进程不在就直接返回，录制照常（实测 kill -9 后手套仍 114.5 Hz）
+
+不读 `data.h5`。录制器是攒 100 行才落盘的，读文件会看到一跳一跳的批数据；而且
+非 SWMR 的 HDF5 同时读写在 chunk 边界上不安全。
+
+
+#### 实时相机关键帧
+
+`--view` 打开时，每路相机默认在窗口底部给一帧缩略图（`--no-view-video` 关掉，
+`--view-video-fps` 默认 5、`--view-video-width` 默认 360）：
+
+- 实现是给**录制那条 ffmpeg 加第二个输出**：`-map 0:v -vf fps=5,scale=360:-2 -c:v mjpeg
+  -f image2pipe pipe:1`，主进程读 stdout、按 SOI/EOI 切出完整 JPEG，只保留最新一帧。
+  另起一条 ffmpeg 抢同一路相机是不行的——DirectShow 独占，第二路直接打不开
+- 抽到 5 fps 是刻意的：窗口本来 20 Hz 刷新，全帧率既看不出来又白烧 CPU。实测预览
+  **5.0 fps、1.0~1.2 KB/帧**，两路合计约 12 KB/s
+- 读管道跑在独立线程里不断排水，否则管道写满会把 ffmpeg 卡住，**录制跟着停**
+- 子进程里用 PIL 解 JPEG，再 `imshow`；缩略图按原始比例显示（不拉伸）
+- 实测对实时性**没有可测影响**（三组对照的数字见 [`../DOC/待验证清单.md`](../DOC/待验证清单.md) F8）
+
+也可以写进配置文件，省得每次敲：
+
+```json
+{
+  "view": true,
+  "view_fps": 20.0,
+  "view_video": true,
+  "view_video_fps": 5.0,
+  "view_video_width": 360
+}
+```
+
+`view` 改成 `true` 后默认开窗口，临时不想看就加 `--no-view`。
+
+## 5. 停止
+
+正常停止只按一次 `Ctrl+C`，等待程序停手套、停相机、回填视频时间戳、写 manifest。
+正常 2~3 秒完成，最坏给 30 秒（相机卡住时每路最多等 6 秒）；只有清理真卡住时才按
+第二次，第二次会立即强制退出，可能没有 manifest。
+
+## 6. 参数与配置
+
+### 6.1 配置文件
+
+`Cap_Quest/cap_config.json` **存在就自动加载**，命令行参数优先于文件：
+
+```json
+{
+  "_说明": "以 _ 开头的键是注释，会被忽略",
+  "camera_mode": "both",
+  "hand_rate": 120
+}
+```
+
+- 键名就是长参数名，`-` 写成 `_`（`camera_mode`、`omit_distribution`）。
+- **字段级说明在文件里**：`_可选项说明` 逐字段写「取值 / 默认 / 影响 / 坑」，
+  `_生效条件` 写清哪些字段在什么前提下才起作用（比如 `view_video_*` 要 `view` 且
+  `camera_mode ≠ none`）。改配置前先看这两块，不要只照抄参数表。
+- 换一份：`python3.10 collect_cap.py --config /path/to/other.json`。
+- 未知键、非法选项值、布尔写成 `"yes"` 都会直接报错退出（退出码 2），不静默忽略。
+- 改完想确认最终生效值：`--help` 里显示的 `(default: ...)` 就是配置文件改写后的默认值。
+
+### 6.2 参数表
+
+下表覆盖 `cap_config.json` 里的全部 22 个字段（键名把 `-` 换成 `_`），另列了一批只在命令行
+用的参数——那些是一次性的，不写进配置文件。字段的取值含义、代价与坑见 `cap_config.json` 的 `_可选项说明`。
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `--hand-port` | `auto` | 手套串口；auto 按 USB `28e9:018a` 发现 |
+| `--hand-rate` | `120` | 连续采集目标频率，范围 1..300 |
+| `--list-devices` | — | 打印串口/视频节点/ffmpeg 版本后退出 |
+| `--cap-side` | `right` | 手套手别，决定视频文件名 |
+| `--pose-source` | `controller` | `controller` / `hand` / `head`，只影响 `pose_6d` |
+| `--pose-side` | `right` | controller/hand 的左右手 |
+| `--quest-rate` | `120` | Quest 轮询频率 |
+| `--quest-start-timeout` | `120` | 等待有效 Quest pose 的超时 |
+| `--quest-ready-samples` | `3` | 启动采集前要求的连续有效 pose 次数 |
+| `--camera-mode` | `both` | `both` / `cam0` / `cam1` / `none` |
+| `--no-cameras` | 关 | 等价 `--camera-mode none` |
+| `--camera-0` / `--camera-1` | `auto` | 指定 `/dev/videoN`；auto 按 sysfs 设备路径排序 |
+| `--camera-width` / `--camera-height` | `1280` / `720` | 请求分辨率 |
+| `--camera-fps` | `30` | 请求帧率 |
+| `--camera-start-timeout` | `15` | 等待相机出帧超时 |
+| `--camera-ready-samples` | `3` | 启动前每路要求的连续新帧数 |
+| `--video-codec` | `copy` | `copy`（MJPEG 直通）/`h264`/`hevc`/`mjpeg` |
+| `--camera-backend` | `linux` | `linux` 用 v4l2 读 `/dev/videoN`；`wsl` 调 Windows 的 `ffmpeg.exe` 走 DirectShow |
+| `--ffmpeg-win` | `sdk/ffmpeg-win/ffmpeg.exe` | Windows 版 ffmpeg 路径，仅 `wsl` 后端用 |
+| `--duration` | `0` | 采集秒数，0 表示到 Ctrl+C |
+| `--output-dir` | — | 默认 `recordings/data_<日期>_<序号>` |
+| `--omit-distribution` | 关 | 不写 444 点分布力 |
+| `--view` / `--no-view` | `false` | 采集时开实时视图；配置文件可设 `view: true` |
+| `--view-mode` | `auto` | `auto` = WSL 用 `html`、原生 Linux 用 `tk`；`html` = 本地页面 `http://127.0.0.1:8765/`（fork 子进程，端口由子进程绑定后回报）；`tk` = matplotlib 独立子进程窗口 |
+| `--view-fps` | `20` | 实时窗口刷新率（`tk` 模式） |
+| `--view-video` / `--no-view-video` | `true` | 实时窗口底部显示相机关键帧（5 fps 抽帧，走录制 ffmpeg 的第二路输出） |
+| `--view-video-fps` | `5` | 实时预览的抽帧帧率 |
+| `--view-video-width` | `360` | 实时预览宽度，高度按比例 |
+| `--no-quest` | 关 | 不采 Quest，跳过 PC Service/ADB 与 pose 等待 |
+| `--skip-adb` | 关 | 不装/不启动 Quest APK |
+| `--allow-usb-only` | 关 | 兼容旧参数；有 USB ADB 时本来就保留 USB |
+| `--apk` / `--package` / `--adb` / `--serial` / `--quest-ip` / `--adb-port` | — | Quest 连接参数 |
+| `--start-pc-service` / `--pc-service-script` / `--no-pc-service-check` | — | PC Service 管理 |
+| `--config` | `cap_config.json` | 配置文件路径 |
+
+ffmpeg/ffprobe 从 `PATH` 找（也认环境变量 `FFMPEG`），所以先
+`export PATH="$HOME/bin:$PATH"`。
+
+### 6.3 相机后端：linux / wsl
+
+两条路采同一批相机，区别只在谁读 USB：
+
+| | `linux` | `wsl` |
+|---|---|---|
+| ffmpeg | Linux 静态版，`-f v4l2` | Windows `ffmpeg.exe`，`-f dshow` |
+| 设备写法 | `/dev/video0` | `video=@device_pnp_\\?\usb#vid_...` |
+| 720p30 实测 | 30 fps（原生 Linux） | 30 fps |
+| 经 usbipd | **5 fps** | 不适用 |
+| pts | 墙钟（`-use_wallclock_as_timestamps`） | 从 0 起，靠 `epoch_unix_ns` 换算 |
+| 停止方式 | SIGINT | stdin 发 `q` |
+
+**WSL 里必须用 `wsl`。** usbipd 转发 UVC 会丢等时包，驱动日志刷 `Dropping payload
+(out of sync)`，720p 从 30 fps 掉到 5 fps（实测）。这个掉速与厂商软件、曝光、分辨率
+协商都无关，换 Windows 原生采集立刻恢复。
+
+配置文件里选：
+
+```json
+{ "camera_backend": "wsl" }
+```
+
+默认是 `linux`，所以同一个仓库拿到原生 Linux 机器上不用改。
+
+`wsl` 后端要一份 Windows 版 ffmpeg，放在 `sdk/ffmpeg-win/ffmpeg.exe`（不入库，
+见 [`../sdk/README.md`](../sdk/README.md)），或用 `--ffmpeg-win` 指定。
+
+**时间戳的差别**：DirectShow 拒绝 `-use_wallclock_as_timestamps`，pts 只能从 0 起。
+采集端在 ffmpeg 启动后轮询输出文件，首个字节落盘的瞬间记 `epoch_unix_ns`（WSL
+墙钟），写进 manifest。读法：
+
+```text
+帧的绝对时刻 = cameras.<id>.epoch_unix_ns + pts
+```
+
+`epoch` 的精度取决于“首字节落盘”与“首帧曝光”的差，实测 ffmpeg 启动到首字节
+1550 ± 10 ms，两路之间相差 9 ms。**不要用 Windows 的系统时间去换算**：WSL 与
+Windows 实测差约 1.61 秒，混用会整体偏 1.6 秒。
+
+## 7. 常见问题
+
+```bash
+ps -eo pid,ppid,stat,etime,cmd | grep "[c]ollect_cap.py"
+v4l2-ctl --list-devices
+ls -l /dev/serial/by-id/ /dev/ttyACM* /dev/ttyUSB* 2>/dev/null
+```
+
+| 现象 | 原因与处理 |
+|---|---|
+| `未发现可用的串口` | 手套没转发进 WSL、线缆松动、不在 dialout 组；先 `usbipd attach` |
+| `检测到多个串口` | 有别的 CDC 设备；用 `--hand-port` 指定 |
+| 相机节点为 0 | usbipd 没 attach；两路 UVC 需分别 attach |
+| `等待 PXCap camX 摄像头画面超时` | 分辨率/帧率不被支持，先降到 640x480 / 15 fps |
+| `时间戳不是墙钟时间` | ffmpeg 太老或命令被改；确认 `-use_wallclock_as_timestamps 1` |
+| 一直"尚未收到 PXCap 连续采集帧" | 串口占用、回调异常；看 manifest 的 `snapshot_errors` |
+| 相机 `actual_fps` 明显低于 30 | usbipd 带宽不够；降分辨率或只录一路 |
+| 采集频率低于目标 | 看 `hand.callback_max_ms` 与 `queue_overflows`；降 `--hand-rate` |
+
+## 8. 已知限制
+
+- 只支持一只手套、一个串口、一个 `PxCap3` handle。
+- 采集端不做对齐，也不做跨源质量判断；采完当场看不出"相机和手套是否真的覆盖同一
+  时间窗"，只有一条 5 秒的粗检告警。
+- 采集中途断电或强杀进程，`manifest.json` 可能缺失，`data.h5` 里未 flush 的尾部行会丢
+  （最多 100 行）。
+- Matroska 时间基是 1 ms，视频时间戳量化误差约 ±0.5 ms。
+- mkv 里存的是绝对 epoch 时间戳，个别播放器会因时间轴起点过大显示异常。
+- 主机墙钟一旦被校时，跨跳变的数据就不可信；采集端的对策是**原样落盘、不修正**。
+- Quest 的空间外参没有标定，`pose_6d` 只是头显 tracking-origin 下的位姿。
+- **相机与手套都没有内参/外参**：单目算不出深度，4 路关节角也变不出指尖三维位置。
+  相机标定尚未实现，见 [`../DOC/标定.md`](../DOC/标定.md) §2。
+
+## 9. 与 `Dex_Quest` 的差异
+
+| 项 | Dex（执行器） | Cap（手套） |
+|---|---|---|
+| 数据源 | `pxdex3` 轮询/回调，有电机 | `pxcap3` 连续采集回调，无电机 |
+| 相机实现 | OpenCV `VideoCapture` 读帧打点 | ffmpeg 直采 V4L2，pts 即墙钟 |
+| 输出 | `aligned.jsonl` + `hand_pose.csv` + 逐帧 JPG | 单文件 `data.h5` |
+| **对齐** | **采集时做完最近邻对齐** | **完全不做，交给下游工程** |
+| 字段 | 四关节 + 电流 + 温度 + 444 点 | 四路编码器 + 关节角 + 10 路合力 + 444 点 |
+
+另有三处必要调整：
+
+- `--hand-rate` 默认 `120` 而不是 `30`：Dex 的 30 Hz 受其关节编码器 78 Hz 限制。
+- `--camera-jpeg-quality` 换成 `--video-codec`：我们录 mkv，不写 JPG。
+- 新增 `--no-quest`：手套常单独用，没有头显时也要能采。
+
+## 10. 验证状态
+
+### 10.1 已执行
+
+| 项 | 结果 |
+|---|---|
+| `py_compile` / `pyflakes` | 全过，0 告警 |
+| `selftest.py` | **102 项全过**（帧解析、Quest 四列时间戳、两条行轴、行数自检、`--omit-distribution`、实时视图推送、配置文件、相机双后端命令、相机单调钟写入、回放载荷的保峰抽稀/时钟漂移/空负载标记、相机首帧偏移/转码失败路径、MJPEG 拆帧与预览输出） |
+| `--list-devices` | 正常输出串口 / V4L2 节点 / ffmpeg |
+| 无设备时报错 | 退出码 **2**，不创建 `recordings/` |
+| 假 SDK 驱动真实主循环（python3.10，5 秒） | 602 行、**120.0 Hz**、`verify` 为空、`alignment: none` |
+| 回调耗时（60 秒合成帧） | 均值 0.21 ms、最大 0.62 ms |
+| 文件体积（合成数据） | 3.6 KB/行 ≈ 1.57 GB/小时（120 Hz，444 点全量） |
+| ffmpeg 链路（lavfi 合成源） | 首帧 pts 1794388000，间隔 33/34 ms，SIGINT 后 ffprobe 能读全帧 |
+| `visualize.py`（合成 data.h5，7200 帧 / 60 s） | 窗口与 `--html` 都能出图；HTML 1.45 MB；实测回放 1.01× 实时；`--save-png` 首帧正常 |
+| `live_view.py`（合成 1200 帧 @120 Hz） | 子进程正常起停；父进程 `push` 均值 **130 µs**、p99 262 µs；240 帧队列零丢弃；`close` 30 ms |
+| **真机（手套 + 双相机 + 回放 + 实时窗口）** | 手套 115.4~118.3 Hz（其中一次 20 s 内 34 处帧间隔空洞，疑 USB 通路，B8 待复测）、两路相机恒 30.0 fps、37 个数据集零不一致；`copy` / `h264` 双档均不丢帧；关 NTP 后时钟零跳变。回放交互、视频对齐（误差 ≤ 半帧）、实时窗口与相机关键帧全部通过。**逐项实测与取证在 [`../DOC/待验证清单.md`](../DOC/待验证清单.md) A / B / D / F 组**，这里不再重复罗列 |
+
+### 10.2 未执行
+
+- **Quest 整组**（无头显）：C3~C8 未测。C8「`sdk_timestamp_ns` 属于哪个时钟」是跨源
+  对齐的前置条件。前置已备齐：PC Service 能起、APK 已入库并校验。
+- **标定是"没实现"而不是"没验证"**：相机内参/外参、手套→相机、Quest→相机四组量
+  全部缺失，采集端不接触像素——见 [`../DOC/标定.md`](../DOC/标定.md) §2。没有这些，
+  指尖三维位置、深度、跨源空间对齐都无从谈起。
+- **手套零点标定没有真机记录**：`hand_calib.py` 写完但只在离线下验证（`selftest`
+  7 项），没在真手套上跑过 `encoder` / `sensor` / `magnet`。默认阈值是按
+  "静止噪声 <0.3°、空载摆动 <0.8 N"估的，**要用真机的 `info` 噪声底复核**——判据见
+  [`../DOC/待验证清单.md`](../DOC/待验证清单.md) B9。
+
+其余待测项与判据在 [`../DOC/待验证清单.md`](../DOC/待验证清单.md)。

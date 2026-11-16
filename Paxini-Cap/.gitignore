@@ -1,0 +1,22 @@
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+
+# 本地设备配置与采集数据
+Cap_Quest/.quest_ip
+Cap_Quest/recordings/
+
+# 大体积厂商二进制（只保留 SHA256SUMS 与说明）
+sdk/**/*.deb
+sdk/**/*.apk
+sdk/**/*.tar.gz
+sdk/ffmpeg-win/*.exe
+
+# 本地环境与编辑器
+.env
+.env.*
+!.env.example
+.idea/
+.vscode/
+*~

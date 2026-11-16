@@ -1,0 +1,65 @@
+hand:
+  side: right
+  closure_sign: 1.0
+  distal_to_proximal_ratio: 0.724
+  open_angles_deg: [0.0, 0.0, 0.0, 0.0]
+  safe_min_angles_deg: [0.0, 0.0, 0.0, 0.0]
+  safe_max_angles_deg: [48.0, 36.0, 48.0, 36.0]
+  index_sensor_indices: [2, 3]
+  middle_sensor_indices: [4, 5, 6, 7]
+  thumb_sensor_indices: [0, 1]
+  palm_sensor_indices: [8, 9]
+  index_sensor_weights: [1.0, 0.41]
+  middle_sensor_weights: [1.0, 0.41, 1.0, 0.41]
+  thumb_sensor_weights: [1.0, 1.0]
+  palm_sensor_weights: [1.0, 1.0]
+
+control:
+  period_s: 0.025
+  collection_hz: 60
+  force_filter_cutoff_hz: 5.0
+  force_deadband_n: 0.15
+  target_force_n: 1.2
+  target_force_ramp_n_s: 1.0
+  max_closure_velocity_deg_s: 15.0
+  prestart_open_velocity_deg_s: 15.0
+  release_velocity_deg_s: 10.0
+  activation_force_n: 0.3
+  contact_release_force_n: 0.1
+  contact_loss_hold_s: 0.3
+  reapproach_velocity_deg_s: 5.0
+  reapproach_span_deg: 10.0
+  local_control_force_limit_n: 1.2
+  local_control_release_force_n: 1.0
+  local_control_clear_duration_s: 0.2
+  local_control_cooldown_s: 0.3
+  local_control_max_relief_count: 3
+  local_control_relief_window_s: 6.0
+
+safety:
+  soft_force_limit_n: 2.5
+  hard_force_limit_n: 4.0
+  local_soft_force_limit_n: 2.0
+  fixed_side_hard_force_limit_n: 5.0
+  temperature_limit_c: 80
+  temperature_duration_s: 5.0
+  stale_freeze_s: 0.1
+  stale_release_s: 0.3
+  stale_fault_s: 1.0
+
+profiles:
+  soft:
+    force_to_velocity_gain: 3.0
+    velocity_damping_gain: 0.45
+    approach_velocity_deg_s: 10.0
+    approach_limit_deg: 38.0
+  semi_rigid:
+    force_to_velocity_gain: 2.5
+    velocity_damping_gain: 0.35
+    approach_velocity_deg_s: 8.0
+    approach_limit_deg: 32.0
+  rigid:
+    force_to_velocity_gain: 2.0
+    velocity_damping_gain: 0.30
+    approach_velocity_deg_s: 6.0
+    approach_limit_deg: 26.0

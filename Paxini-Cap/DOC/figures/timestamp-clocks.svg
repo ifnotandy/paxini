@@ -1,0 +1,33 @@
+<svg width="680" height="244" viewBox="0 0 680 244" xmlns="http://www.w3.org/2000/svg" role="img">
+  <title>同一批帧在墙钟与单调时钟上的间隔</title>
+  <desc>四个间隔 8.3 毫秒的连续帧，在墙钟轴上因校时出现 2.2 秒的跳变，单调时钟轴上仍保持 8.3 毫秒。</desc>
+  <rect x="0" y="0" width="680" height="244" fill="#F7F6F3"/>
+
+  <text x="70" y="48" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="11" fill="#185FA5">CLOCK_REALTIME  ·  timestamp_unix_ns</text>
+  <text x="412" y="48" text-anchor="middle" font-family="ui-sans-serif,system-ui,sans-serif" font-size="11" fill="#A32D2D">被校时改写</text>
+  <line x1="70" y1="66" x2="620" y2="66" stroke="#378ADD" stroke-width="1"/>
+  <line x1="110" y1="60" x2="110" y2="72" stroke="#378ADD" stroke-width="1"/>
+  <line x1="230" y1="60" x2="230" y2="72" stroke="#378ADD" stroke-width="1"/>
+  <line x1="350" y1="60" x2="350" y2="72" stroke="#378ADD" stroke-width="1"/>
+  <line x1="470" y1="60" x2="470" y2="72" stroke="#378ADD" stroke-width="1"/>
+  <path d="M404 60 L412 72" fill="none" stroke="#E24B4A" stroke-width="1"/>
+  <path d="M414 60 L422 72" fill="none" stroke="#E24B4A" stroke-width="1"/>
+  <text x="170" y="90" text-anchor="middle" font-family="ui-sans-serif,system-ui,sans-serif" font-size="11" fill="#5F5E5A">8.3 ms</text>
+  <text x="290" y="90" text-anchor="middle" font-family="ui-sans-serif,system-ui,sans-serif" font-size="11" fill="#5F5E5A">8.3 ms</text>
+  <text x="410" y="90" text-anchor="middle" font-family="ui-sans-serif,system-ui,sans-serif" font-size="11" fill="#A32D2D">2.2 s</text>
+  <text x="545" y="90" text-anchor="middle" font-family="ui-sans-serif,system-ui,sans-serif" font-size="11" fill="#5F5E5A">8.3 ms</text>
+
+  <text x="70" y="128" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="11" fill="#0F6E56">CLOCK_MONOTONIC  ·  timestamp_monotonic_ns</text>
+  <line x1="70" y1="146" x2="620" y2="146" stroke="#1D9E75" stroke-width="1"/>
+  <line x1="110" y1="140" x2="110" y2="152" stroke="#1D9E75" stroke-width="1"/>
+  <line x1="230" y1="140" x2="230" y2="152" stroke="#1D9E75" stroke-width="1"/>
+  <line x1="350" y1="140" x2="350" y2="152" stroke="#1D9E75" stroke-width="1"/>
+  <line x1="470" y1="140" x2="470" y2="152" stroke="#1D9E75" stroke-width="1"/>
+  <text x="170" y="170" text-anchor="middle" font-family="ui-sans-serif,system-ui,sans-serif" font-size="11" fill="#5F5E5A">8.3 ms</text>
+  <text x="290" y="170" text-anchor="middle" font-family="ui-sans-serif,system-ui,sans-serif" font-size="11" fill="#5F5E5A">8.3 ms</text>
+  <text x="410" y="170" text-anchor="middle" font-family="ui-sans-serif,system-ui,sans-serif" font-size="11" fill="#5F5E5A">8.3 ms</text>
+  <text x="545" y="170" text-anchor="middle" font-family="ui-sans-serif,system-ui,sans-serif" font-size="11" fill="#5F5E5A">8.3 ms</text>
+
+  <text x="70" y="204" font-family="ui-sans-serif,system-ui,sans-serif" font-size="11" fill="#185FA5">unix → 行主轴、与视频时间戳同一把尺</text>
+  <text x="70" y="224" font-family="ui-sans-serif,system-ui,sans-serif" font-size="11" fill="#0F6E56">monotonic → 帧间隔、实际频率、Quest 采样时刻</text>
+</svg>
