@@ -24,8 +24,8 @@
 | 回放抽稀 | `viewer/visualize.py` | `build_preview()`(:295) | `selftest` 的 "可视化" 组 |
 | 实时视图 | `viewer/live_view.py` | `HtmlLiveView`(:775) / `LiveView`(:922) | `--view` 起一次 |
 | 手套零点标定 | `calib/hand_calib.py` | `check_*_gate`、子命令 `encoder`/`sensor`/`magnet` | `calib/hand_calib.py selftest`（7 项） |
-| 相机延迟测量（WSL 路径） | `latency/measure_camera_latency_wsl.py` | 整份，自包含；需在 Windows 侧执行 | 跑一次看 IQR 与解码率 |
-| 相机延迟测量（原生 Ubuntu 路径） | `latency/measure_camera_latency.py` | 整份，复用 `FfmpegCamera(backend="linux")` | 跑一次看 IQR 与前后半段漂移 |
+| 相机延迟测量（WSL 路径） | `latency/measure_camera_latency_wsl.py` | 整份，自包含；需在 Windows 侧执行；默认逐路测 cam0/cam1 | 跑一次看 IQR 与解码率 |
+| 相机延迟测量（原生 Ubuntu 路径） | `latency/measure_camera_latency.py` | 整份，复用 `FfmpegCamera(backend="linux")`；默认逐路测 cam0/cam1 | 跑一次看 IQR 与前后半段漂移 |
 | 延迟测量台账 | `latency/latency_records.py` | 纯标准库 + PyYAML，两个测量脚本共用 | 改字段要同步 `records/*.yaml` 与下游读法 |
 
 ## 关键常量（写代码前先看这几个）
