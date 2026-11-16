@@ -33,7 +33,7 @@ ffmpeg 让每帧 pts 直接取主机墙钟并原样写进容器，停止后用 `
 |---|---|---|
 | `capture/` | 采集主程序与设备驱动层 | `collect_cap.py`（主）、`camera_ffmpeg.py`、`quest3.py` |
 | `calib/` | 手套零点标定（写设备存储；报告落 `../calib/hand/`） | `hand_calib.py` |
-| `latency/` | 相机延迟测量 | `measure_camera_latency.py`（原生 Ubuntu / V4L2）、`measure_camera_latency_wsl.py`（WSL，相机走 DirectShow） |
+| `latency/` | 相机延迟测量 | `measure_camera_latency.py`（原生 Ubuntu / V4L2）、`measure_camera_latency_wsl.py`（WSL，相机走 DirectShow）；结果记在 `records/` |
 | `viewer/` | 可视化 | `visualize.py`（回放）、`live_view.py`（实时） |
 | `selftest/` | 不接硬件的自检 | `selftest.py` |
 | `scripts/` | 一键脚本 | `run_capture_noquest.sh` |
@@ -491,13 +491,59 @@ ffmpeg/ffprobe 从 `PATH` 找（也认环境变量 `FFMPEG`），所以先
 
 `epoch` 的精度取决于"首字节落盘"与"首帧曝光"的差 —— 这是个可以直接测的量。
 [`latency/measure_camera_latency_wsl.py`](latency/measure_camera_latency_wsl.py)
-用屏幕二维码对时，本机（WSL 路径）实测中位数约 **191 ms**（含显示链路与 DirectShow
-缓冲），单轮 IQR 约 5 ms。改分辨率、帧率、codec 或换 USB 口都要重测。
+用屏幕二维码对时。本机（WSL 路径）2026-11-16 同一天连测三次：
 
-**这个 191 ms 只适用于 WSL 路径。** 原生 Ubuntu（V4L2）的 pts 本身就是墙钟，没有
+| 序号 | 中位数 | IQR | 说明 |
+|---|---|---|---|
+| 1 | 189.71 ms | 5.17 | 正常 |
+| 2 | 287.22 ms | 4.82 | 整体高 95 ms（≈3 帧），重测后恢复 |
+| 3 | 192.30 ms | 6.12 | 正常 |
+
+三次的 IQR 都在 5~6 ms，抖动一直很小，**变的是整条链路**（DirectShow 缓冲从 1 帧
+涨到 3~4 帧就是这个量级）。所以不要记死一个数：**每次测完自动写进
+[`latency/records/`](latency/records/)，下游读最近一次的合格值**，见 §6.4。
+
+**这个数只适用于 WSL 路径。** 原生 Ubuntu（V4L2）的 pts 本身就是墙钟，没有
 锚点那一段，Δ 通常只有几十毫秒，要用
 [`latency/measure_camera_latency.py`](latency/measure_camera_latency.py) 单独测。
 两个数不可互换，拿错了时间轴会整体平移一百多毫秒，而行数、间隔、单调性全都正常。
+
+### 6.4 测量结果台账
+
+两个测量脚本跑完都会往 `latency/records/<电脑用户>-<win|ubuntu>.yaml` 追加一条，
+**一台机器一个文件**，键是测量序号：
+
+```yaml
+machine: andy-win
+platform: win
+backend: wsl
+measurements:
+  1:
+    at: '2026-11-16T21:04:54+08:00'
+    camera: 0
+    median_ms: 189.712      # 修正量：时间轴减掉这么多
+    iqr_ms: 5.17
+    samples: 213
+    ok: true                # 样本 ≥ 30、IQR ≤ 40 ms，直接用
+```
+
+下游读法：
+
+```python
+import sys
+sys.path.insert(0, "<repo>/Paxini-Cap/Cap_Quest/latency")
+from latency_records import load_records, pick_latest
+
+# 不给路径 = 本机这份；WSL 里跑会自去找 <user>-win.yaml
+entry = pick_latest(load_records(), camera=0)
+median = entry["median_ms"]            # 192.3
+```
+
+- `pick_latest` 默认跳过 `ok: false` 的记录；两路相机延迟不同，`camera` 必须指明。
+- 换分辨率、帧率、codec、USB 口都要重测，脚本会把参数一并记下，`delta_prev_ms`
+  给出与上一条同参数记录的差值，超过 20 ms 会当场提醒。
+- 每个 `latency_measure/<时间戳>_*/` 目录仍是本次的完整产物（逐帧 CSV、直方图、
+  录制的 mkv），台账里 `output_dir` 指回去。
 
 **不要拿另一个系统的时钟去换算。** WSL 与 Windows 的墙钟不一定对齐：本机 2026-11-16
 实测差 0.3 ms，但历史记录里出现过 1.61 s（NTP 没同步时就会这样）。稳妥做法是在同一个

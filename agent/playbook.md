@@ -93,6 +93,25 @@ python3.10 latency/measure_camera_latency.py --camera 0 --seconds 15
 **成功判据**：解码率 > 30%、样本 ≥ 100、IQR < 20 ms。Ubuntu 版还要看「前后漂移」
 < 10 ms —— 超了说明测的时候系统时钟被步进过，或者相机在自动调曝光，结果不能用。
 
+**测完自动记账，不用手抄**：`latency/records/<电脑用户>-<win|ubuntu>.yaml`，
+一台机器一个文件，键是测量序号；日志末尾会打印「测量记录 … 第 N 次（合格）」。
+`--no-record` 可以跳过，用来调试。
+
+同一台机器不同时间的读数会**整体跳一档**：本机 2026-11-16 连测三次是
+189.7 → 287.2 → 192.3 ms，而 IQR 一直只有 5~6 ms。所以下游取数只许从台账读
+最近一次的合格值，别抄某个固定数字：
+
+```python
+import sys; sys.path.insert(0, "Paxini-Cap/Cap_Quest/latency")
+from latency_records import load_records, pick_latest
+
+entry = pick_latest(load_records(), camera=0)   # 跳过 ok: false，两路相机要分开取
+median = entry["median_ms"]
+```
+
+台账里每条带 `delta_prev_ms`（与上一条同参数的差），超过 20 ms 时测量当场警告，
+说明链路变了 —— 先重测确认，别直接拿去修时间轴。
+
 结果怎么用：
 
 - Windows：`timestamp_unix_ns` 和 `timestamp_monotonic_ns` **两列都减**

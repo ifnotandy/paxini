@@ -66,6 +66,8 @@ from pathlib import Path
 import numpy as np
 import yaml
 
+from latency_records import DELTA_WARN_MS, record_measurement
+
 if hasattr(sys.stdout, "reconfigure"):
     # 不要强改成 UTF-8：PowerShell 5.1 / cmd 的控制台代码页是 936，按 UTF-8
     # 输出会整屏乱码。保持控制台原编码，只放宽错误处理，遇到编码不了的字符
@@ -752,6 +754,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--fps", type=float, default=None)
     parser.add_argument("--video-codec", default=None, choices=("copy", "h264", "hevc", "mjpeg"))
     parser.add_argument("--device", default=None, help="直接指定 -i 参数")
+
+    group = parser.add_argument_group("测量记录（写 latency/records/<机器>.yaml）")
+    group.add_argument("--machine", default=None,
+                       help="台账里的机器标识，默认 <用户名>-win")
+    group.add_argument("--record-dir", type=Path, default=None,
+                       help="台账目录，默认 latency/records")
+    group.add_argument("--note", default="",
+                       help="给这次测量写一句备注，比如「换了 USB 口」「锁死曝光」")
+    group.add_argument("--no-record", action="store_true",
+                       help="只出本次产物，不写台账（调试用）")
     return parser.parse_args(argv)
 
 
@@ -916,6 +928,25 @@ def main(argv: list[str] | None = None) -> int:
     if args.repeat > 1:
         merged_json, merged_plot = write_merged(output_dir, camera_id, rounds, hits, stats, meta)
 
+    # 把这次结论追加进台账：下游按机器读一个固定文件，不用翻时间戳目录。
+    recorded = None
+    if not args.no_record:
+        try:
+            recorded = record_measurement(
+                platform="win",
+                camera=args.camera,
+                stats=stats,
+                meta={**meta, "seconds": args.seconds},
+                output_dir=output_dir,
+                record_dir=args.record_dir,
+                machine=args.machine,
+                detection_rate=detection_rate,
+                note=args.note,
+                clock_domain="windows（QR 时间与 epoch 同为 time.time_ns）",
+            )
+        except (OSError, RuntimeError) as exc:
+            print(f"[警告] 测量记录没写成功，本次产物不受影响：{exc}", file=sys.stderr)
+
     print("=" * 62)
     print("结果")
     print("=" * 62)
@@ -977,6 +1008,21 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  汇总       {paths['json']}")
         if paths["plot"]:
             print(f"  直方图     {paths['plot']}")
+    if recorded:
+        record_file, seq, entry = recorded
+        verdict_text = "合格" if entry["ok"] else "不合格"
+        print(f"  测量记录   {record_file}  第 {seq} 次（{verdict_text}）")
+        if entry.get("median_ms") is not None:
+            print(f"             下游用这个：{entry['median_ms']:.2f} ms")
+        delta = entry.get("delta_prev_ms")
+        if delta is not None and abs(delta) > DELTA_WARN_MS:
+            before = entry["median_ms"] - delta
+            print(
+                f"[警告] 与上一条合格记录差 {delta:+.1f} ms"
+                f"（{before:.2f} → {entry['median_ms']:.2f}）。环境没变的话重测一次确认："
+                "驱动缓冲、自动曝光、换 USB 口都会让整条时间轴整体平移",
+                file=sys.stderr,
+            )
     print("=" * 62)
     print("怎么用：")
     print("  timestamp_corrected = timestamp_unix_ns - 中位数(ms) * 1e6")
