@@ -42,10 +42,16 @@ venv/
 .env.*
 !.env.example
 
-# ---------- 编辑器 ----------
+# ---------- 编辑器 / 系统生成的垃圾 ----------
 .idea/
 .vscode/
 *.swp
 *~
 .Thumbs.db
 desktop.ini
+.DS_Store
+*.lnk
+*.url
+
+# ---------- 测量产物（每次跑都会重新生成）----------
+**/latency_measure/
