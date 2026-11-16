@@ -32,7 +32,7 @@ ffmpeg 让每帧 pts 直接取主机墙钟并原样写进容器，停止后用 `
 | 目录 | 内容 | 入口 |
 |---|---|---|
 | `capture/` | 采集主程序与设备驱动层 | `collect_cap.py`（主）、`camera_ffmpeg.py`、`quest3.py` |
-| `calib/` | 手套零点标定（写设备存储；报告落 `../calib/hand/`） | `hand_calib.py` |
+| `calib/` | 手套零点标定（写设备存储；报告落 `calib/hand/`，不入库） | `hand_calib.py` |
 | `latency/` | 相机延迟测量 | `measure_camera_latency.py`（原生 Ubuntu / V4L2）、`measure_camera_latency_wsl.py`（WSL，相机走 DirectShow）；结果记在 `records/` |
 | `viewer/` | 可视化 | `visualize.py`（回放）、`live_view.py`（实时） |
 | `selftest/` | 不接硬件的自检 | `selftest.py` |

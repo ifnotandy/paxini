@@ -39,11 +39,10 @@ from pathlib import Path
 from typing import Any, NoReturn, Sequence
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-# 标定程序在 Cap_Quest/calib/ 下：配置文件在上一层（Cap_Quest 根），
-# 标定报告仍写到 Paxini-Cap/calib/hand（再上一层，项目级留证）
+# 标定程序本身在 Cap_Quest/calib/ 下：配置在上一层（Cap_Quest 根），
+# 报告写在本目录的 hand/，和程序放在一起，不再往 Paxini-Cap 顶层丢。
 QUEST_ROOT = SCRIPT_DIR.parent
-REPO_ROOT = QUEST_ROOT.parent
-REPORT_DIR = REPO_ROOT / "calib" / "hand"
+REPORT_DIR = SCRIPT_DIR / "hand"
 DEFAULT_CONFIG_PATH = QUEST_ROOT / "cap_config.yaml"
 CAP_USB_ID = "28e9:018a"
 
