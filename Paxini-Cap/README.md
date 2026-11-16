@@ -14,7 +14,7 @@ Paxini-Cap/
 │   ├── selftest/           # 不接硬件的自检，102 项
 │   ├── scripts/            # 一键采集脚本
 │   ├── recordings/         # 采集输出（data_<日期>_<序号>/）
-│   └── cap_config.json     # 可选配置（存在即加载，命令行优先）
+│   └── cap_config.yaml     # 可选配置（存在即加载，命令行优先）
 ├── DOC/                # 文档（格式说明、时钟说明、待验证清单、标定）
 │   ├── README.md           # 文档索引 + 阅读顺序 + 维护约定
 │   ├── HDF5结构说明.md     # 逐字段说明 + 完整目录树（data.h5 的唯一权威文档）
@@ -57,8 +57,9 @@ Paxini-Cap/
 6. **`DOC/HDF5结构说明.md` 被用户手动编辑过**，只能定点修改，禁止整份重写。
 7. **改 `cap/` 或 `quest/` 的布局必须升 `format_version`**（当前 `4`），并在
    `HDF5结构说明.md` 的版本变更表里写清改了什么。下游按版本号判断怎么读。
-8. **WSL 里相机必须用 `camera_backend: wsl`。** usbipd 转发 UVC 会丢等时包，720p
-   从 30 fps 掉到 5 fps，且与曝光、分辨率、厂商软件都无关。两条后端的技术对比见
+8. **WSL 里相机不能走 V4L2。** usbipd 转发 UVC 会丢等时包，720p 从 30 fps 掉到
+   5 fps，且与曝光、分辨率、厂商软件都无关。`camera_backend: auto` 已经按运行环境
+   判好了（WSL → wsl），除非要强制，不用手工填。两条路径的技术对比见
    [`Cap_Quest/README.md` §6.3](Cap_Quest/README.md)。
 
 ### 0.2 代码地图
@@ -66,7 +67,7 @@ Paxini-Cap/
 | 想改什么 | 改哪里 |
 |---|---|
 | 增删 HDF5 字段 | `collect_cap.py` 的 `CAP_DATASETS` / `_quest_layout()`，再同步文档和 selftest |
-| 加命令行参数 | `build_parser()` + `cap_config.json` + `Cap_Quest/README.md` 参数表 |
+| 加命令行参数 | `build_parser()` + `cap_config.yaml` + `Cap_Quest/README.md` 参数表 |
 | 回放窗口 / HTML | `visualize.py`（`collect_payload` 读+抽稀，`run_window`/`write_viewer` 两个出口） |
 | 采集时实时视图 | `live_view.py`：`HtmlLiveView`（fork 子进程 + 队列，WSL 默认）／`LiveView`（fork 子进程的 Tk 窗口，原生 Linux 默认） |
 | 视频采集与 pts 回填 | `camera_ffmpeg.py` |

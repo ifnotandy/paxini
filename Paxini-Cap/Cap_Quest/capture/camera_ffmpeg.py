@@ -37,6 +37,9 @@ from typing import Sequence
 WALLCLOCK_MIN_NS = 1_500_000_000_000
 VIDEO_CODECS = ("copy", "h264", "hevc", "mjpeg")
 CAMERA_BACKENDS = ("linux", "wsl")
+# ``auto`` is resolved once at startup by ``resolve_backend``; nothing downstream
+# ever stores it, because the manifest has to record which path actually ran.
+CAMERA_BACKEND_CHOICES = ("auto",) + CAMERA_BACKENDS
 PROGRESS_POLL_S = 0.01
 STOP_TIMEOUT_S = 4.0
 # How long to watch the output file before declaring that the first frame never
@@ -154,6 +157,45 @@ def log(message: str) -> None:
 
 def warn(message: str) -> None:
     print(f"[警告] {message}", file=sys.stderr, flush=True)
+
+
+def running_in_wsl() -> bool:
+    """True when this Linux is a WSL distro rather than a native install.
+
+    Three independent signals, because none of them is set in every launch
+    path: ``WSL_DISTRO_NAME`` comes from ``wsl.exe``, ``WSL_INTEROP`` from the
+    interop server, and the kernel release string carries ``microsoft`` on both
+    WSL1 and WSL2 even when the distro was started by systemd.
+    """
+    if os.environ.get("WSL_DISTRO_NAME") or os.environ.get("WSL_INTEROP"):
+        return True
+    try:
+        release = Path("/proc/sys/kernel/osrelease").read_text(encoding="utf-8")
+    except OSError:
+        return False
+    return "microsoft" in release.lower()
+
+
+def resolve_backend(requested: str | None = None) -> str:
+    """Turn ``auto`` into a concrete backend; leave explicit choices alone.
+
+    WSL keeps the camera on the Windows side: usbipd forwards UVC over USB/IP,
+    which drops isochronous packets, and a camera that does 30 fps natively
+    collapses to ~5 fps after the detour.  Native Linux has no such hop, so V4L2
+    is both simpler and the only path whose pts is already epoch time.
+
+    An explicit ``linux`` in WSL is still honoured — someone may have a working
+    passthrough and prefer it — but it is never chosen automatically.
+    """
+    value = (requested or "auto").strip().lower()
+    if value == "auto":
+        return "wsl" if running_in_wsl() else "linux"
+    if value not in CAMERA_BACKENDS:
+        raise RuntimeError(
+            f"未知相机后端：{requested!r}"
+            f"（可选 {' / '.join(CAMERA_BACKEND_CHOICES)}）"
+        )
+    return value
 
 
 def discover_video_nodes(

@@ -35,7 +35,7 @@ python3.10 capture/collect_cap.py --cap-side right --no-quest
 | `SERIAL_BUSY(102)` | 串口被占：关掉 PXCap Studio、`hand_calib.py`、旧进程 |
 | 找不到串口 | `ls /dev/ttyACM*`；空就重跑 `usbipd attach`；再不行查 `dialout` 组 |
 | `import pxhandsdk` 成功但没 `PxCap3` | 用成 3.12 了，换 `python3.10` |
-| 相机 0 fps / 5 fps | `camera_backend` 是不是被改回 `linux` 了 |
+| 相机 0 fps / 5 fps | 日志里的「相机后端」是不是被强制成 `linux` 了 |
 | 相机 20 秒不出图 | 先 `--camera-mode cam0` 排除带宽；再验分辨率是否被支持 |
 | 等 Quest 超时 120 s | 没有头显就加 `--no-quest` |
 | 采完没有 `manifest.json` | 被强杀了。`data.h5` 尾部最多丢 100 行，重采 |
@@ -54,30 +54,49 @@ python3.10 capture/collect_cap.py --cap-side right --no-quest
 ## 4. 加一个命令行参数
 
 1. `capture/collect_cap.py` 的 `build_parser()` 加 `add_argument`
-2. `cap_config.json` 加同名字段 + 在 `_可选项说明` 里写一行
+2. `cap_config.yaml` 加同名字段 + 一行注释
 3. `load_config_file()` / `apply_config()` 确认这个键会被读取（命令行优先于文件）
 4. `Cap_Quest/README.md` §6.2 参数表加一行
 5. `selftest` 的"配置"组加用例
 
 验证：`python3.10 capture/collect_cap.py --help` 能看到，且
-`python3.10 -c "import json;print(json.load(open('cap_config.json')))"` 不报错。
+`python3.10 -c "import yaml;print(yaml.safe_load(open('cap_config.yaml')))"` 不报错。
 
 ## 5. 测相机延迟
 
-**必须在 Windows 侧跑**，让二维码时刻和 `epoch` 同在一个时钟域：
+**用哪个脚本取决于你走哪条采集路径。** 两路的时间戳构成不同，测出来的数不可互换：
+
+| 采集路径 | 脚本 | 帧时间戳的构成 | 实测量级 |
+|---|---|---|---|
+| WSL（相机借 Windows 的 ffmpeg.exe / DirectShow） | `latency/measure_camera_latency_wsl.py` | `epoch_unix_ns + 相对 pts` | 约 190 ms，主要是显示与 DirectShow 缓冲 |
+| 原生 Ubuntu（ffmpeg / V4L2） | `latency/measure_camera_latency.py` | 墙钟 pts 本身，无锚点 | 几十毫秒 |
+
+Windows：
 
 ```powershell
 cd C:\Users\Andy\Desktop\paxini\Paxini-Cap\Cap_Quest
 & "C:\Users\Andy\AppData\Local\Programs\Python\Python312\python.exe" `
-  latency\measure_camera_latency_win.py --camera 0 --seconds 15 --repeat 3
+  latency\measure_camera_latency_wsl.py --camera 0 --seconds 15 --repeat 3
+```
+
+Ubuntu：
+
+```bash
+cd <repo>/Paxini-Cap/Cap_Quest
+export PATH="$HOME/bin:$PATH"
+sudo timedatectl set-ntp false          # pts 走 CLOCK_REALTIME，测完记得开回来
+python3.10 latency/measure_camera_latency.py --camera 0 --seconds 15
 ```
 
 把弹出的二维码窗口对准相机，占画面 1/4 以上。
 
-**成功判据**：解码率 > 30%、样本 ≥ 100、IQR < 20 ms。三个都满足才填进下游修正。
+**成功判据**：解码率 > 30%、样本 ≥ 100、IQR < 20 ms。Ubuntu 版还要看「前后漂移」
+< 10 ms —— 超了说明测的时候系统时钟被步进过，或者相机在自动调曝光，结果不能用。
 
-结果怎么用：`timestamp_corrected = timestamp_unix_ns - 中位数(ms) * 1e6`，
-`timestamp_monotonic_ns` 同样减。
+结果怎么用：
+
+- Windows：`timestamp_unix_ns` 和 `timestamp_monotonic_ns` **两列都减**
+- Ubuntu：只有 `timestamp_unix_ns` 一列，减它
 
 ## 6. 看采到的数据
 

@@ -10,7 +10,7 @@
 |---|---|---|---|
 | 增删 HDF5 数据集 | `capture/collect_cap.py` | `CAP_DATASETS`(:515) | `selftest` + 同步 `DOC/HDF5结构说明.md` |
 | 改 `quest/` 的列 | `capture/collect_cap.py` | `_quest_layout()`(:602) | `selftest` 的 "Quest 行" 组 |
-| 加命令行参数 | `capture/collect_cap.py` | `build_parser()`(:1142) | `--help` 对照 + 补 `cap_config.json` |
+| 加命令行参数 | `capture/collect_cap.py` | `build_parser()`(:1142) | `--help` 对照 + 补 `cap_config.yaml` |
 | 改配置加载/优先级 | `capture/collect_cap.py` | `load_config_file()`(:1459)、`apply_config()`(:1484) | `selftest` 的 "配置" 组 |
 | 采集主循环节拍 | `capture/collect_cap.py` | `pump_and_record()`(:1749) | 跑一次采集看 `manifest.row_mismatch` |
 | 回调线程入队 | `capture/collect_cap.py` | `snapshot_cap_frame()`(:284) | 只做拷贝，别在这里写盘 |
@@ -24,7 +24,8 @@
 | 回放抽稀 | `viewer/visualize.py` | `build_preview()`(:295) | `selftest` 的 "可视化" 组 |
 | 实时视图 | `viewer/live_view.py` | `HtmlLiveView`(:775) / `LiveView`(:922) | `--view` 起一次 |
 | 手套零点标定 | `calib/hand_calib.py` | `check_*_gate`、子命令 `encoder`/`sensor`/`magnet` | `calib/hand_calib.py selftest`（7 项） |
-| 相机延迟测量 | `latency/measure_camera_latency_win.py` | 整份，自包含 | 跑一次看 IQR 与解码率 |
+| 相机延迟测量（WSL 路径） | `latency/measure_camera_latency_wsl.py` | 整份，自包含；需在 Windows 侧执行 | 跑一次看 IQR 与解码率 |
+| 相机延迟测量（原生 Ubuntu 路径） | `latency/measure_camera_latency.py` | 整份，复用 `FfmpegCamera(backend="linux")` | 跑一次看 IQR 与前后半段漂移 |
 
 ## 关键常量（写代码前先看这几个）
 

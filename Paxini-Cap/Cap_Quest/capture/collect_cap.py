@@ -43,10 +43,11 @@ from typing import Any, Callable, Sequence
 try:
     import h5py
     import numpy as np
+    import yaml
 except ImportError as exc:  # pragma: no cover - dependency guard
     print(
         f"[错误] 缺少依赖：{exc}。请运行 "
-        "python3.10 -m pip install --user numpy h5py",
+        "python3.10 -m pip install --user numpy h5py pyyaml",
         file=sys.stderr,
     )
     raise SystemExit(2)
@@ -59,12 +60,15 @@ if str(_VIEWER_DIR) not in sys.path:
     sys.path.insert(0, str(_VIEWER_DIR))
 
 from camera_ffmpeg import (
+    CAMERA_BACKEND_CHOICES,
     FfmpegCamera,
     discover_video_nodes,
     ffmpeg_version,
     find_ffmpeg,
     find_windows_ffmpeg,
     interrupt_running_cameras,
+    resolve_backend,
+    running_in_wsl,
     wait_for_cameras_ready,
 )
 from quest3 import (
@@ -86,7 +90,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 # 配置被采集、延时测量、手套标定三处共用，放根目录避免各自维护一份。
 QUEST_ROOT = SCRIPT_DIR.parent
 DEFAULT_OUTPUT_ROOT = QUEST_ROOT / "recordings"
-DEFAULT_CONFIG_PATH = QUEST_ROOT / "cap_config.json"
+DEFAULT_CONFIG_PATH = QUEST_ROOT / "cap_config.yaml"
 # PXCap III has no motor/encoder bottleneck, so the default matches the product
 # data rate instead of PXDex's 30 Hz (PXDex is limited by its 78 Hz encoder).
 DEFAULT_HAND_RATE_HZ = 120
@@ -1272,12 +1276,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--camera-backend",
-        choices=("linux", "wsl"),
-        default="linux",
+        choices=CAMERA_BACKEND_CHOICES,
+        default="auto",
         help=(
-            "相机采集后端。linux：ffmpeg 直接读 /dev/videoN（原生 Linux）；"
+            "相机采集路径。auto（默认）：WSL 里用 wsl、原生 Linux 用 linux，"
+            "启动时按运行环境判定并打印结果；"
+            "linux：ffmpeg 直接读 /dev/videoN；"
             "wsl：调 Windows 的 ffmpeg.exe 走 DirectShow。usbipd 转发 UVC 会"
-            "丢等时包，720p 从 30fps 掉到 5fps，WSL 里必须选 wsl"
+            "丢等时包，720p 从 30fps 掉到 5fps，所以 WSL 里必须用 wsl"
         ),
     )
     parser.add_argument(
@@ -1379,7 +1385,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--config",
         default=str(DEFAULT_CONFIG_PATH),
         help=(
-            "JSON 配置文件路径，默认 Cap_Quest/cap_config.json（存在即加载）；"
+            "YAML 配置文件路径，默认 Cap_Quest/cap_config.yaml（存在即加载）；"
             "命令行参数优先于配置文件"
         ),
     )
@@ -1457,27 +1463,31 @@ def create_output_dir(path: Path) -> None:
 
 
 def load_config_file(path: Path) -> dict[str, Any]:
-    """Read the optional JSON config.
+    """Read the optional YAML config.
 
-    Keys are the long option names with underscores (``camera_mode``).
-    Keys starting with ``_`` are treated as comments and ignored.
+    Keys are the long option names with underscores (``camera_mode``). YAML is a
+    superset of JSON, so an old ``cap_config.json`` still parses; comments are
+    real ``#`` lines now, but keys starting with ``_`` are still skipped so that
+    older files keep working.
     """
     if not path.is_file():
         return {}
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        text = path.read_text(encoding="utf-8")
     except OSError as exc:
         raise RuntimeError(f"无法读取配置文件：{path}（{exc}）") from exc
-    except json.JSONDecodeError as exc:
-        raise RuntimeError(
-            f"配置文件不是合法 JSON：{path}（第 {exc.lineno} 行：{exc.msg}）"
-        ) from exc
+    try:
+        payload = yaml.safe_load(text) or {}
+    except yaml.YAMLError as exc:
+        mark = getattr(exc, "problem_mark", None)
+        where = f"第 {mark.line + 1} 行第 {mark.column + 1} 列：" if mark else ""
+        raise RuntimeError(f"配置文件不是合法 YAML：{path}（{where}{exc}）") from exc
     if not isinstance(payload, dict):
-        raise RuntimeError(f"配置文件顶层必须是 JSON 对象：{path}")
+        raise RuntimeError(f"配置文件顶层必须是映射（键: 值）：{path}")
     return {
-        key: value
+        str(key): value
         for key, value in payload.items()
-        if not key.startswith("_") and value is not None
+        if not str(key).startswith("_") and value is not None
     }
 
 
@@ -1857,7 +1867,27 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if config:
         log(f"[INFO] 已加载配置：{config_path}（{len(config)} 项）")
+    elif config_path == DEFAULT_CONFIG_PATH:
+        # 默认文件不存在时，检查是不是还留着改名前的那份 JSON：静默忽略会让人
+        # 以为配置生效了，实际跑的是内置默认值。
+        legacy = DEFAULT_CONFIG_PATH.with_suffix(".json")
+        if legacy.is_file():
+            warn(
+                f"磁盘上还有 {legacy.name}，但它已不再自动加载；"
+                f"改名为 {DEFAULT_CONFIG_PATH.name} 才会生效"
+            )
     validate_args(parser, args)
+    # ``auto`` is resolved once here so that every later branch (device
+    # discovery, ffmpeg command, manifest) sees a concrete backend.
+    requested_backend = args.camera_backend
+    try:
+        args.camera_backend = resolve_backend(requested_backend)
+    except RuntimeError as exc:
+        error(str(exc))
+        return 2
+    if requested_backend == "auto":
+        reason = "WSL 环境" if running_in_wsl() else "非 WSL（原生 Linux）"
+        log(f"[INFO] 相机后端：{args.camera_backend}（auto 判定：{reason}）")
     signal.signal(signal.SIGINT, handle_stop_signal)
     signal.signal(signal.SIGTERM, handle_stop_signal)
     STOP_EVENT.clear()

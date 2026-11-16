@@ -78,5 +78,5 @@ Paxini-Dex/   会运动
 历史上有过一版对齐代码，被整体删除了。
 
 **3. 以为 WSL 里能直接读相机。**
-不能。WSL 里必须 `camera_backend: wsl`，让 Windows 的 `ffmpeg.exe` 走 DirectShow。
-usbipd 转发 UVC 会让 720p 从 30 fps 掉到 5 fps。
+不能。WSL 里相机要走 Windows 的 `ffmpeg.exe` + DirectShow；`camera_backend: auto` 已经
+按环境判好了，日志会打印落点。usbipd 转发 UVC 会让 720p 从 30 fps 掉到 5 fps。

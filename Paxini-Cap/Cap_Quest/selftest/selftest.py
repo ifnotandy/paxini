@@ -765,6 +765,21 @@ def test_config_file(tmp_root: Path) -> None:
     )
     check("配置/文件不存在返回空", load_config_file(tmp_root / "nope.json") == {})
 
+    yaml_path = tmp_root / "cfg.yaml"
+    yaml_path.write_text(
+        "# 整行注释\n"
+        "camera_mode: cam0   # 行尾也算注释\n"
+        "hand_rate: 90\n"
+        "view: true\n",
+        encoding="utf-8",
+    )
+    yaml_config = load_config_file(yaml_path)
+    check(
+        "配置/读 YAML 且注释被忽略",
+        yaml_config == {"camera_mode": "cam0", "hand_rate": 90, "view": True},
+        str(yaml_config),
+    )
+
     parser = build_parser()
     apply_config(parser, config, path)
     args = parser.parse_args([])
@@ -876,10 +891,34 @@ def test_camera_backend(tmp_root: Path) -> None:
 
     default_args = build_parser().parse_args([])
     check(
-        "相机后端/默认 linux",
-        default_args.camera_backend == "linux",
+        "相机后端/默认 auto",
+        default_args.camera_backend == "auto",
         default_args.camera_backend,
     )
+
+    from camera_ffmpeg import resolve_backend
+
+    with mock.patch("camera_ffmpeg.running_in_wsl", return_value=True):
+        resolved = resolve_backend("auto")
+    check("相机后端/auto 在 WSL 判成 wsl", resolved == "wsl", resolved)
+
+    with mock.patch("camera_ffmpeg.running_in_wsl", return_value=False):
+        resolved = resolve_backend("auto")
+    check("相机后端/auto 在原生判成 linux", resolved == "linux", resolved)
+
+    check(
+        "相机后端/显式值不被 auto 覆盖",
+        resolve_backend("linux") == "linux" and resolve_backend("wsl") == "wsl",
+        f'{resolve_backend("linux")}/{resolve_backend("wsl")}',
+    )
+
+    try:
+        resolve_backend("dshow")
+    except RuntimeError:
+        rejected = True
+    else:
+        rejected = False
+    check("相机后端/未知值报错", rejected, "RuntimeError" if rejected else "未报错")
 
 
 def test_visualize_video(tmp_root: Path) -> None:

@@ -3,9 +3,12 @@
 # 必须用系统 python3.10 安装，不要用 venv（该环境 ensurepip 会失败）：
 #   python3.10 -m pip install --user -r requirements.txt
 #
-# 已验证版本：numpy 2.2.6 / h5py 3.16.0 / matplotlib 3.10.9 / xrobotoolkit-sdk（最新）
+# 已验证版本：numpy 2.2.6 / h5py 3.16.0 / matplotlib 3.10.9 / PyYAML 6.0.1 /
+#             xrobotoolkit-sdk（最新）
 numpy>=1.24
 h5py>=3.8
+# capture/collect_cap.py 读 cap_config.yaml
+pyyaml>=6.0
 # visualize.py 用；窗口模式还需要系统包 python3.10-tk（--html 不用）
 matplotlib>=3.7
 xrobotoolkit-sdk

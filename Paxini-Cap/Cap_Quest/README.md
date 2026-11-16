@@ -33,12 +33,12 @@ ffmpeg 让每帧 pts 直接取主机墙钟并原样写进容器，停止后用 `
 |---|---|---|
 | `capture/` | 采集主程序与设备驱动层 | `collect_cap.py`（主）、`camera_ffmpeg.py`、`quest3.py` |
 | `calib/` | 手套零点标定（写设备存储；报告落 `../calib/hand/`） | `hand_calib.py` |
-| `latency/` | 相机延迟测量 | `measure_camera_latency_win.py`（Windows 原生）、`measure_camera_latency.py`（WSL） |
+| `latency/` | 相机延迟测量 | `measure_camera_latency.py`（原生 Ubuntu / V4L2）、`measure_camera_latency_wsl.py`（WSL，相机走 DirectShow） |
 | `viewer/` | 可视化 | `visualize.py`（回放）、`live_view.py`（实时） |
 | `selftest/` | 不接硬件的自检 | `selftest.py` |
 | `scripts/` | 一键脚本 | `run_capture_noquest.sh` |
 | `recordings/` | 采集输出（`data_<日期>_<序号>/`） | — |
-| `cap_config.json` | 采集配置，采集 / 延时测量 / 标定三处共用 | — |
+| `cap_config.yaml` | 采集配置，采集 / 延时测量 / 标定三处共用 | — |
 
 跨目录依赖靠各脚本开头的 `sys.path` 注入解决：`viewer/`、`selftest/`、`latency/`
 都会把 `capture/` 加进搜索路径。`calib/` 只依赖 SDK，不引用采集模块，跟 `capture/`
@@ -96,7 +96,7 @@ bash scripts/run_capture_noquest.sh -- --video-codec h264   # 其余参数写在
 ```
 
 它比手工敲多了四层保护：找不到 `python3.10`/`PXCap3`、找不到 `ffmpeg` 或 `ffprobe`、
-WSL 里没有 `/dev/ttyACM0`、`camera_backend: wsl` 却没有 `ffmpeg.exe`，都会在启动前停下
+WSL 里没有 `/dev/ttyACM0`、判定成 wsl 却没有 `ffmpeg.exe`，都会在启动前停下
 并给出该输入的命令；跑完自动打印帧数、实际帧率、视频体积与 `verify.row_mismatch`，
 校验不过退出码为 3（区别于环境问题的 2）。
 
@@ -112,14 +112,14 @@ usbipd 的 attach 随之失效，而 `usbipd list` 仍显示 `Attached`。脚本
 
 #### 换一台机器要改什么
 
-代码里的路径都相对**脚本所在目录**解析（`cap_config.json`、`recordings/`、
+代码里的路径都相对**脚本所在目录**解析（`cap_config.yaml`、`recordings/`、
 `../sdk/ffmpeg-win/`），所以只要仓库结构不变就不用改代码。真正会挡住别人的是四件事：
 
 | 项 | 本机现状 | 别人怎么办 |
 |---|---|---|
 | Python | 系统 `python3` 是 3.12，`PxCap3` 只在 `python3.10` 里 | 用 `python3.10`（或 `PYTHON=` 指定） |
 | 手套 SDK | `pxhandsdk 1.0.0.0` 已 `dpkg` 装 | 装 SDK + `setup-serial-access.sh` + 重登让 `dialout` 生效 |
-| 相机后端 | `cap_config.json` 写死 `"camera_backend": "wsl"` | 原生 Linux 主机改成 `"linux"`，否则会去找 Windows 的 `ffmpeg.exe` |
+| 相机后端 | `cap_config.yaml` 是 `auto`，WSL 里判成 `wsl` | 不用改；要强制就填 `linux` / `wsl` 或加 `--camera-backend` |
 | `ffmpeg.exe` | `sdk/ffmpeg-win/ffmpeg.exe`，**不入库** | 从 `sdk/README.md` 给的地址下载，或改用 `linux` 后端 |
 
 另外 `usbipd attach --busid 3-3` 里的 `3-3` 是本机总线号，换机器会变——脚本已经改成按
@@ -385,28 +385,26 @@ HTTP 服务、页面、JPEG 缓冲、MJPEG 连接全在子进程里。两处细�
 
 ### 6.1 配置文件
 
-`Cap_Quest/cap_config.json` **存在就自动加载**，命令行参数优先于文件：
+`Cap_Quest/cap_config.yaml` **存在就自动加载**，命令行参数优先于文件：
 
-```json
-{
-  "_说明": "以 _ 开头的键是注释，会被忽略",
-  "camera_mode": "both",
-  "hand_rate": 120
-}
+```yaml
+camera_mode: both        # both / cam0 / cam1 / none
+hand_rate: 120           # 连续采集请求频率 Hz
+view: false              # 采集时开实时窗口
 ```
 
 - 键名就是长参数名，`-` 写成 `_`（`camera_mode`、`omit_distribution`）。
-- **字段级说明在文件里**：`_可选项说明` 逐字段写「取值 / 默认 / 影响 / 坑」，
-  `_生效条件` 写清哪些字段在什么前提下才起作用（比如 `view_video_*` 要 `view` 且
-  `camera_mode ≠ none`）。改配置前先看这两块，不要只照抄参数表。
-- 换一份：`python3.10 capture/collect_cap.py --config /path/to/other.json`。
+- **注释是真的注释**：`#` 之后到行尾都不参与解析。字段级的代价与坑写在文件里的行内
+  注释中，改配置前先看，不要只照抄参数表。
+- 换一份：`python3.10 capture/collect_cap.py --config /path/to/other.yaml`。**旧的 `.json`
+  也能直接用**——YAML 是 JSON 的超集，解析器不看扩展名。
 - 未知键、非法选项值、布尔写成 `"yes"` 都会直接报错退出（退出码 2），不静默忽略。
 - 改完想确认最终生效值：`--help` 里显示的 `(default: ...)` 就是配置文件改写后的默认值。
 
 ### 6.2 参数表
 
-下表覆盖 `cap_config.json` 里的全部 22 个字段（键名把 `-` 换成 `_`），另列了一批只在命令行
-用的参数——那些是一次性的，不写进配置文件。字段的取值含义、代价与坑见 `cap_config.json` 的 `_可选项说明`。
+下表覆盖 `cap_config.yaml` 里的全部 22 个字段（键名把 `-` 换成 `_`），另列了一批只在命令行
+用的参数——那些是一次性的，不写进配置文件。字段的取值含义、代价与坑写在该文件的行内注释里。
 
 | 参数 | 默认 | 说明 |
 |---|---|---|
@@ -427,7 +425,7 @@ HTTP 服务、页面、JPEG 缓冲、MJPEG 连接全在子进程里。两处细�
 | `--camera-start-timeout` | `15` | 等待相机出帧超时 |
 | `--camera-ready-samples` | `3` | 启动前每路要求的连续新帧数 |
 | `--video-codec` | `copy` | `copy`（MJPEG 直通）/`h264`/`hevc`/`mjpeg` |
-| `--camera-backend` | `linux` | `linux` 用 v4l2 读 `/dev/videoN`；`wsl` 调 Windows 的 `ffmpeg.exe` 走 DirectShow |
+| `--camera-backend` | `auto` | `auto` 按运行环境判定：WSL → `wsl`，原生 Linux → `linux`；也可强制 `linux` / `wsl` |
 | `--ffmpeg-win` | `sdk/ffmpeg-win/ffmpeg.exe` | Windows 版 ffmpeg 路径，仅 `wsl` 后端用 |
 | `--duration` | `0` | 采集秒数，0 表示到 Ctrl+C |
 | `--output-dir` | — | 默认 `recordings/data_<日期>_<序号>` |
@@ -443,7 +441,7 @@ HTTP 服务、页面、JPEG 缓冲、MJPEG 连接全在子进程里。两处细�
 | `--allow-usb-only` | 关 | 兼容旧参数；有 USB ADB 时本来就保留 USB |
 | `--apk` / `--package` / `--adb` / `--serial` / `--quest-ip` / `--adb-port` | — | Quest 连接参数 |
 | `--start-pc-service` / `--pc-service-script` / `--no-pc-service-check` | — | PC Service 管理 |
-| `--config` | `cap_config.json` | 配置文件路径 |
+| `--config` | `cap_config.yaml` | 配置文件路径（YAML；旧的 JSON 也能解析） |
 
 ffmpeg/ffprobe 从 `PATH` 找（也认环境变量 `FFMPEG`），所以先
 `export PATH="$HOME/bin:$PATH"`。
@@ -465,13 +463,20 @@ ffmpeg/ffprobe 从 `PATH` 找（也认环境变量 `FFMPEG`），所以先
 (out of sync)`，720p 从 30 fps 掉到 5 fps（实测）。这个掉速与厂商软件、曝光、分辨率
 协商都无关，换 Windows 原生采集立刻恢复。
 
-配置文件里选：
+不用手工选。配置里是 `auto`：
 
 ```json
-{ "camera_backend": "wsl" }
+{ "camera_backend": "auto" }
 ```
 
-默认是 `linux`，所以同一个仓库拿到原生 Linux 机器上不用改。
+启动时按运行环境判定，并在日志里打印落点：
+
+```text
+[INFO] 相机后端：wsl（auto 判定：WSL 环境）
+```
+
+同一个仓库拿到原生 Ubuntu 机器上自动变成 `linux`，不用改配置。要强制某条路径时，
+命令行 `--camera-backend linux|wsl` 或配置文件写死都行。
 
 `wsl` 后端要一份 Windows 版 ffmpeg，放在 `sdk/ffmpeg-win/ffmpeg.exe`（不入库，
 见 [`../sdk/README.md`](../sdk/README.md)），或用 `--ffmpeg-win` 指定。
@@ -485,8 +490,14 @@ ffmpeg/ffprobe 从 `PATH` 找（也认环境变量 `FFMPEG`），所以先
 ```
 
 `epoch` 的精度取决于"首字节落盘"与"首帧曝光"的差 —— 这是个可以直接测的量。
-[`latency/`](latency/) 下的程序用屏幕二维码对时，本机实测中位数约 **191 ms**
-（含显示链路），单轮 IQR 约 5 ms。改分辨率、帧率、codec 或换 USB 口都要重测。
+[`latency/measure_camera_latency_wsl.py`](latency/measure_camera_latency_wsl.py)
+用屏幕二维码对时，本机（WSL 路径）实测中位数约 **191 ms**（含显示链路与 DirectShow
+缓冲），单轮 IQR 约 5 ms。改分辨率、帧率、codec 或换 USB 口都要重测。
+
+**这个 191 ms 只适用于 WSL 路径。** 原生 Ubuntu（V4L2）的 pts 本身就是墙钟，没有
+锚点那一段，Δ 通常只有几十毫秒，要用
+[`latency/measure_camera_latency.py`](latency/measure_camera_latency.py) 单独测。
+两个数不可互换，拿错了时间轴会整体平移一百多毫秒，而行数、间隔、单调性全都正常。
 
 **不要拿另一个系统的时钟去换算。** WSL 与 Windows 的墙钟不一定对齐：本机 2026-11-16
 实测差 0.3 ms，但历史记录里出现过 1.61 s（NTP 没同步时就会这样）。稳妥做法是在同一个

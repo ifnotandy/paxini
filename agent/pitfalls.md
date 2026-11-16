@@ -51,7 +51,7 @@ python -m pip install --force-reinstall --no-deps opencv-python
 **根因**：DirectShow 相机是独占的。上一轮 `ffmpeg.exe` 退出后驱动还要一点时间才
 真正释放。
 
-**对策**：两轮之间等 2~3 秒。`latency/measure_camera_latency_win.py` 的 `--repeat`
+**对策**：两轮之间等 2~3 秒。`latency/measure_camera_latency_wsl.py` 的 `--repeat`
 已内置 2.5 s 等待 + 一次重试。
 
 ### `import pxhandsdk` 成功，但 `PxCap3` 不存在
@@ -107,8 +107,19 @@ python -m pip install --force-reinstall --no-deps opencv-python
 
 **根因**：没做相机延迟标定，或用的是别人机器上的默认值。
 
-**对策**：跑 `latency/measure_camera_latency_win.py`，中位数填进去。改了分辨率、
-帧率、codec、USB 口、机器都要重测。
+**对策**：跑对应采集路径的测量脚本（原生 Ubuntu → `measure_camera_latency.py`，WSL →
+`measure_camera_latency_wsl.py`），中位数填进去。改了分辨率、帧率、codec、USB 口、机器
+都要重测。
+
+### 原生 Ubuntu 采的数据减了 WSL 测的 Δ，时间轴整体平移
+
+**根因**：两条路径的 pts 基准不同。V4L2 的 pts 是绝对墙钟；DirectShow 的 pts 被
+ffmpeg 归零到首帧，再靠 `epoch` 平移成绝对时间。Δ 也不是同一个量：原生 Ubuntu 通常
+几十毫秒，WSL 约 190 ms，多的是虚拟机边界与 DirectShow 缓冲。
+
+**识别**：拿错数只会让时间轴整体平移，行数、间隔、单调性全都正常，看不出异常。
+
+**对策**：两条路径各测各的，别抄。判据是量级：差三到五倍就说明拿错了。
 
 ### 跨系统时钟相减，结果每次都不一样
 

@@ -127,9 +127,10 @@ Cap，违反约束 1。
 **规则**：`python3.10 -m venv` 在这个环境里 ensurepip 会失败。一律
 `python3.10 -m pip install --user`。
 
-### 14. WSL 里相机必须 `camera_backend: wsl`
+### 14. WSL 里相机不能走 V4L2
 
-**规则**：不能用 usbipd 转发 UVC 给 Linux 侧。
+**规则**：不能用 usbipd 转发 UVC 给 Linux 侧。`camera_backend: auto`（默认）在 WSL
+里会判成 `wsl`，把相机留给 Windows 的 `ffmpeg.exe`；不要为了「统一」手工改成 `linux`。
 
 **违反了会怎样**：720p 从 30 fps 掉到 5 fps，驱动日志刷
 `Dropping payload (out of sync)`。与曝光、分辨率、厂商软件都无关，调参数无效。

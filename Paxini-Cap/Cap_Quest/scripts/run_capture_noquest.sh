@@ -91,9 +91,20 @@ PATH="$(dirname -- "$FFMPEG_BIN"):$PATH"
 export PATH
 printf '  ffmpeg  %s\n  ffprobe %s\n' "$FFMPEG_BIN" "$FFPROBE_BIN"
 
-# 相机后端预检。wsl 后端要一份 Windows 版 ffmpeg.exe（不入库）；linux 后端要
-# /dev/video* 节点。这台机器的配置是 wsl，换机器/换目录时最容易在这里踩空。
-BACKEND="$("$PY" -c 'import json,os,sys; p=sys.argv[1]; print((json.load(open(p)).get("camera_backend") or "linux") if os.path.isfile(p) else "linux")' "$QUEST_ROOT/cap_config.json" 2>/dev/null || echo linux)"
+# 相机后端预检。wsl 路径要一份 Windows 版 ffmpeg.exe（不入库）；linux 路径要
+# /dev/video* 节点。配置里是 auto 时按运行环境判定，换机器最容易在这里踩空。
+# 判定逻辑只有一份：直接问程序，别在这里复刻一遍（auto 的落点会变）。
+BACKEND="$("$PY" -c '
+import os, sys, yaml
+sys.path.insert(0, sys.argv[1])
+from camera_ffmpeg import resolve_backend
+path = sys.argv[2]
+requested = "auto"
+if os.path.isfile(path):
+    with open(path, encoding="utf-8") as handle:
+        requested = (yaml.safe_load(handle) or {}).get("camera_backend") or "auto"
+print(resolve_backend(requested))
+' "$QUEST_ROOT/capture" "$QUEST_ROOT/cap_config.yaml" 2>/dev/null || echo linux)"
 if [ "$BACKEND" = "wsl" ]; then
   WIN_FFMPEG="${FFMPEG_WIN:-$(cd "$QUEST_ROOT/.." && pwd)/sdk/ffmpeg-win/ffmpeg.exe}"
   if [ -f "$WIN_FFMPEG" ]; then
@@ -107,7 +118,7 @@ else
 fi
 
 # --- 3/6 手套串口（必要时自动 detach/attach）--------------------------------
-# 只转发手套；相机走 Windows DirectShow（camera_backend: wsl），不需要 usbipd。
+# 只转发手套；相机在 WSL 路径下走 Windows DirectShow，不需要 usbipd。
 # WSL 发行版空闲约 60 秒（vmIdleTimeout 默认）就会关掉，attach 跟着失效，而
 # usbipd list 仍显示 Attached —— 所以这里不看状态列，只认 /dev/ttyACM0 在不在，
 # 不在就当场重连，省掉每次手工 detach/attach。

@@ -1,45 +1,71 @@
 #!/usr/bin/env python3.10
-"""measure_camera_latency.py —— 测量相机采集链路的延迟
+"""measure_camera_latency.py —— 测量相机采集链路的延迟（原生 Ubuntu / V4L2）
+
+项目有两条采集路径，区别只在相机这一路怎么接：
+
+- **原生 Ubuntu**：ffmpeg 直读 ``/dev/videoN``（V4L2），本文件就是这条
+- **WSL**：Python 仍跑在 Linux 里，相机借 Windows 的 ``ffmpeg.exe`` 走
+  DirectShow，用同目录的 ``measure_camera_latency_wsl.py`` 测
+
+两者的 Δ 不可互换，各测各的。
 
 问题
 ----
-采集端给相机写的时间戳不是「这一帧被拍下的时刻」。wsl 后端（Windows 采集路径）里：
+采集端写进 HDF5 的相机时间戳，含义是「ffmpeg 从驱动队列取到这一帧的时刻」，
+不是「这一帧被拍下的时刻」。两者之间隔着：
 
-    timestamp_unix_ns[i] = epoch_unix_ns + pts[i]
+    曝光 + 传感器读出 + MJPEG 编码 + USB 传输 + 驱动缓冲
 
-``pts`` 是 DirectShow 的流相对时间，从 0 起；``epoch_unix_ns`` 是「mkv 文件
-首次变大」时打下的 WSL 墙钟。这一帧真正被拍下，比 ``epoch + pts`` 早若干毫秒
-到几百毫秒 —— 早的那段就是本程序要测的 Δ。
+这段差值就是本程序要测的 Δ。拿到之后下游减掉它，时间轴才回到接近曝光时刻。
 
-拿到 Δ 之后，下游把 ``timestamp_unix_ns`` 整体减掉它，时间轴就回到接近曝光时刻。
+和 WSL 路径的关键差别
+--------------------
+原生 Ubuntu 用 ``-use_wallclock_as_timestamps 1``，ffmpeg 在出帧时直接写
+``av_gettime()``，所以 **mkv 里的 pts 本身就是绝对墙钟**，不需要任何锚点：
+
+    timestamp_unix_ns[i] = pts[i]                    # 原生 Ubuntu / V4L2
+    timestamp_unix_ns[i] = epoch_unix_ns + pts[i]    # WSL / DirectShow
+
+WSL 路径的 pts 从 0 起（没有 ``-copyts``，ffmpeg 把首帧归零），靠「mkv 文件首次
+变大」取的 epoch 正好落在首帧写出那一刻，所以 ffmpeg.exe 启动那 1.4 秒并不进入
+时间戳。WSL 实测约 190 ms，多出来的是虚拟机边界与 DirectShow 缓冲，不是锚点误差。
+
+- 原生 Ubuntu 的 Δ 通常几十毫秒，WSL 约 190 ms
+- 单轮就够；WSL 那边轮间会差 20 ms 左右，要 ``--repeat`` 合并
+- 两条路径的 Δ **绝对不可互换**，基准不同，各测各的
 
 做法
 ----
 1. 屏幕上以最高速刷新二维码，内容是生成那一刻的 ``time.time_ns()``。
-   必须是 **WSL 墙钟**：Windows 与 WSL 的墙钟实测差 1.6 s，混用会得到一个
-   一千多秒的假延迟（见 DOC/时间戳说明.md §4.2）。
-2. 用 ``camera_ffmpeg.FfmpegCamera`` 录一段 mkv，参数与 collect_cap.py 完全
-   一致 —— 只有同一条链路测出来的数才能拿去修采集数据。
-3. 停止后 ffprobe 取每帧 pts，加 epoch 还原绝对时刻。
+   QR 时刻和 pts 都取自同一台机器的 ``CLOCK_REALTIME``，差值里没有时钟域问题。
+2. 用 ``camera_ffmpeg.FfmpegCamera`` 录一段 mkv，参数与 collect_cap.py 的
+   linux 分支完全一致 —— 只有同一条链路测出来的数才能拿去修采集数据。
+3. 停止后 ffprobe 取每帧 pts（已经是墙钟纳秒），并校验首帧落在合理年份区间。
 4. 逐帧解码二维码，得到该帧画面上那份内容的生成时刻。
 5. Δ = 帧时刻 − 码内时刻，逐帧落盘，输出中位数。
 
 测出来的 Δ 包含两段
 ------------------
-- **相机链路**：曝光 + MJPEG 编码 + USB 传输 + 驱动缓冲 + ffmpeg 处理
-- **显示链路**：WSLg 合成 + 窗口上屏 + 屏幕刷新等待
+- **相机链路**：曝光 + MJPEG 编码 + USB 传输 + 驱动缓冲 + ffmpeg 取帧
+- **显示链路**：窗口合成 + 屏幕扫描输出 + 刷新等待
 
-真实世界场景要的是前者，所以填参数时按 ``--display-latency-ms`` 扣掉后者。
-显示那段本程序测不到绝对值，只给出可观测下界（QR 编码耗时、imshow 耗时）。
-屏幕刷新等待的理论均值是半个刷新周期 —— 60 Hz 屏约 8.3 ms。
+真实场景（相机拍实物）不需要显示那一段，所以填参数时可以用
+``--display-latency-ms`` 扣掉它。显示段本程序测不到绝对值，只给可观测下界
+（QR 编码耗时、imshow 耗时）；屏幕刷新等待的理论均值是半个刷新周期，
+60 Hz 屏约 8.3 ms。
 
 用法
 ----
-    cd /mnt/c/Users/Andy/Desktop/paxini/Paxini-Cap/Cap_Quest
-    python3.10 measure_camera_latency.py --list
-    python3.10 measure_camera_latency.py --camera 0 --seconds 15
+    cd <repo>/Paxini-Cap/Cap_Quest
+    export PATH="$HOME/bin:$PATH"          # 静态 ffmpeg/ffprobe
+    sudo timedatectl set-ntp false          # 测前关 NTP，见下方注意
+    python3.10 latency/measure_camera_latency.py --list
+    python3.10 latency/measure_camera_latency.py --camera 0 --seconds 15
 
-对着屏幕放相机，让二维码占画面四分之一以上；按 q 可提前结束。
+把二维码窗口拖到相机正前方，占画面四分之一以上；按 q 可提前结束。
+
+注意：pts 来自 ``CLOCK_REALTIME``，测量期间若 NTP 步进一次系统时间，那段时间
+的样本会整体偏掉。关掉 NTP 再测；测完记得 ``sudo timedatectl set-ntp true``。
 """
 
 from __future__ import annotations
@@ -47,6 +73,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import os
 import statistics
 import sys
 import time
@@ -55,6 +82,7 @@ from datetime import datetime
 from pathlib import Path
 
 import numpy as np
+import yaml
 
 # 采集模块在 ../capture：延时测量单独成目录后要显式补搜索路径
 _CAPTURE_DIR = Path(__file__).resolve().parent.parent / "capture"
@@ -62,22 +90,19 @@ if str(_CAPTURE_DIR) not in sys.path:
     sys.path.insert(0, str(_CAPTURE_DIR))
 
 from camera_ffmpeg import (
-    CAMERA_BACKENDS,
     VIDEO_CODECS,
     FfmpegCamera,
     discover_video_nodes,
-    discover_windows_cameras,
     ffmpeg_version,
     find_ffmpeg,
-    find_windows_ffmpeg,
     log,
     warn,
 )
 
 HERE = Path(__file__).resolve().parent
-# 配置与输出都放在 Cap_Quest 根目录，和采集程序共用同一份 cap_config.json
+# 配置与输出都放在 Cap_Quest 根目录，和采集程序共用同一份 cap_config.yaml
 QUEST_ROOT = HERE.parent
-CONFIG_PATH = QUEST_ROOT / "cap_config.json"
+CONFIG_PATH = QUEST_ROOT / "cap_config.yaml"
 DEFAULT_OUTPUT_ROOT = QUEST_ROOT / "latency_measure"
 
 # 一次测量至少要有这么多有效样本，否则中位数不可信。
@@ -88,24 +113,25 @@ COMFORTABLE_SAMPLES = 100
 QR_TEXT_MIN_LEN = 18
 QR_TEXT_MAX_LEN = 20
 # 延迟落在窗口外的样本视为解码错误或时钟异常，直接丢弃。
+# 下界放到 -50 ms：Linux 上真实值可能低到 20~30 ms，抖动会更早碰线。
 PLAUSIBLE_LATENCY_MS = (-50.0, 3000.0)
-# 二维码只比生成时刻晚这么久以内的，才算同一批样本。
-QR_ACCEPT_WINDOW_NS = 3_000_000_000
+# 前后半段中位数差超过这个值就认为测量期间环境变了（NTP 步进、CPU 抢占）。
+DRIFT_WARN_MS = 10.0
 
 
 # ---------------------------------------------------------------- 配置与设备
 
 
 def load_cap_config() -> dict:
-    """读 cap_config.json；下划线开头的键是注释，丢掉。"""
+    """读 cap_config.yaml；解析失败就退回内置默认值，让测量能继续。"""
     if not CONFIG_PATH.is_file():
         return {}
     try:
-        raw = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+        raw = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8")) or {}
+    except (OSError, yaml.YAMLError) as exc:
         warn(f"读取 {CONFIG_PATH.name} 失败，改用内置默认值：{exc}")
         return {}
-    return {key: value for key, value in raw.items() if not key.startswith("_")}
+    return {str(key): value for key, value in raw.items() if not str(key).startswith("_")}
 
 
 def pick(value, fallback):
@@ -113,17 +139,32 @@ def pick(value, fallback):
     return fallback if value is None else value
 
 
-def resolve_devices(backend: str, count: int, ffmpeg_exe: str) -> list[tuple[str, str]]:
+def node_label(node: str) -> str:
+    """给 /dev/videoN 配一个可读名字，方便对上物理相机。"""
+    name_path = Path("/sys/class/video4linux") / Path(node).name / "name"
+    try:
+        card = name_path.read_text(encoding="utf-8").strip()
+    except OSError:
+        card = ""
+    return f"{node}  {card}".rstrip()
+
+
+def resolve_devices() -> list[tuple[str, str]]:
     """返回 [(显示名, -i 参数)]，顺序即相机编号顺序。
 
-    wsl 后端走 DirectShow 枚举；同名相机靠 PnP 实例 ID 区分，不能只取名字，
-    否则两路都会打开第一台（见 camera_ffmpeg.discover_windows_cameras）。
+    只看 index==0 的采集节点，UVC 设备旁边那个 metadata 节点读不出画面。
     """
-    if backend == "wsl":
-        items = discover_windows_cameras(ffmpeg_exe)
-        return [(item["name"], item["input"]) for item in items]
-    nodes = discover_video_nodes()
-    return [(node, node) for node in nodes]
+    return [(node_label(node), node) for node in discover_video_nodes()]
+
+
+def check_display() -> None:
+    """没有图形会话时提前报错，别等到 imshow 才崩在 cv2 里。"""
+    if os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"):
+        return
+    raise RuntimeError(
+        "当前会话既没有 DISPLAY 也没有 WAYLAND_DISPLAY，开不了二维码窗口。"
+        "本程序必须在本机桌面上跑（不能用 ssh 直接跑，也不能纯 tty）"
+    )
 
 
 # ---------------------------------------------------------------- 二维码
@@ -203,10 +244,13 @@ class RecordResult:
     video_path: Path
     frames: int
     fps: float
-    epoch_unix_ns: int
     timestamps_ns: list[int]
     samples: list[ShowSample] = field(default_factory=list)
     elapsed_s: float = 0.0
+
+    @property
+    def first_ts_ns(self) -> int:
+        return self.timestamps_ns[0] if self.timestamps_ns else 0
 
 
 def record_with_qr(
@@ -220,7 +264,7 @@ def record_with_qr(
 
     返回 (屏幕上刷过的所有二维码, 实际刷码时长)。
 
-    cv2 的窗口操作全部留在主线程：Qt 后端在子线程里 imshow 会偶发段错误。
+    cv2 的窗口操作全部留在主线程：Qt/GTK 后端在子线程里 imshow 会偶发段错误。
     相机那边是独立进程，不占主线程。
     """
     import cv2
@@ -242,7 +286,7 @@ def record_with_qr(
             ready_streak += 1
             if ready_streak >= 3:
                 break
-        # 等相机的这段时间也要让窗口重绘，否则 WSLg 会显示成空白/未响应。
+        # 等相机的这段时间也要让窗口重绘，否则窗口显示成空白/未响应。
         blank = np.full((size_px, size_px), 255, dtype=np.uint8)
         cv2.putText(
             blank,
@@ -300,9 +344,7 @@ def run_camera(
     device_name: str,
     device_input: str,
     output_dir: Path,
-    backend: str,
     ffmpeg_exe: str,
-    windows_ffmpeg: str | None,
     width: int,
     height: int,
     fps: float,
@@ -321,8 +363,7 @@ def run_camera(
         fps,
         codec,
         ffmpeg_exe,
-        backend=backend,
-        windows_ffmpeg=windows_ffmpeg,
+        backend="linux",
         preview_fps=0.0,  # 不要预览流：第二个输出会改变 ffmpeg 的写出节奏
     )
     camera.open()
@@ -332,11 +373,14 @@ def run_camera(
     finally:
         camera.stop()
 
+    # probe() 在原生 Ubuntu 路径下直接返回墙钟 pts，并自带「首帧是否像墙钟」的校验。
     video = camera.probe()
-    if camera.epoch_unix_ns is None:
+    # 再加一道时间合理区间检查：pts 若是设备自己的计数器，会落在 1970 年附近。
+    first_year = datetime.fromtimestamp(video.timestamps_ns[0] / 1e9).year
+    if not 2020 <= first_year <= 2100:
         raise RuntimeError(
-            "没有捕捉到 mkv 首次变大的时刻，无法把 pts 锚到墙钟。"
-            "重采一次；持续失败就把输出目录换到 WSL 本地盘试试。"
+            f"首帧时间戳对应 {first_year} 年，明显不是当前墙钟。"
+            "pts 不是 av_gettime()，请核对 ffmpeg 命令里的 -use_wallclock_as_timestamps 1"
         )
     log(
         f"[INFO] {camera_id}（{device_name}）录到 {video.frames} 帧 / "
@@ -347,7 +391,6 @@ def run_camera(
         video_path=video.path,
         frames=video.frames,
         fps=video.actual_fps,
-        epoch_unix_ns=camera.epoch_unix_ns,
         timestamps_ns=list(video.timestamps_ns),
         samples=samples,
         elapsed_s=elapsed,
@@ -413,6 +456,10 @@ def summarize(hits: list[FrameHit]) -> dict:
     values = np.array([hit.latency_ms for hit in hits], dtype=float)
     if values.size == 0:
         return {"samples": 0}
+    # 前后半段分开算中位数：两者差得多，说明测量期间环境变了（NTP 步进、
+    # CPU 抢占、相机自动曝光在调整），这时整个数都不能用。
+    half = values.size // 2
+    drift = float(np.median(values[half:]) - np.median(values[:half])) if half else 0.0
     return {
         "samples": int(values.size),
         "median_ms": float(np.median(values)),
@@ -425,6 +472,7 @@ def summarize(hits: list[FrameHit]) -> dict:
         "p75_ms": float(np.percentile(values, 75)),
         "p95_ms": float(np.percentile(values, 95)),
         "iqr_ms": float(np.percentile(values, 75) - np.percentile(values, 25)),
+        "drift_ms": drift,
     }
 
 
@@ -434,37 +482,47 @@ def verdict(stats: dict, detection_rate: float, samples_shown: int) -> list[str]
     n = stats.get("samples", 0)
     if n < MIN_SAMPLES:
         lines.append(
-            f"✗ 有效样本只有 {n} 个（要 ≥ {MIN_SAMPLES}）：二维码没被稳定拍到。"
+            f"x 有效样本只有 {n} 个（要 >= {MIN_SAMPLES}）：二维码没被稳定拍到。"
             "把窗口放大、相机靠近、调好焦距后重测"
         )
         return lines
     if n < COMFORTABLE_SAMPLES:
-        lines.append(f"△ 样本 {n} 个，够用但偏少；中位数误差约 ±{stats['iqr_ms'] / 2:.0f} ms")
+        lines.append(f"~ 样本 {n} 个，够用但偏少；中位数误差约 +/-{stats['iqr_ms'] / 2:.0f} ms")
     else:
-        lines.append(f"✓ 样本充足（{n} 个）")
+        lines.append(f"OK 样本充足（{n} 个）")
 
     iqr = stats["iqr_ms"]
-    if iqr <= 20:
-        lines.append(f"✓ 抖动小（IQR {iqr:.1f} ms），分布集中，结果可直接用")
-    elif iqr <= 50:
-        lines.append(f"△ 抖动中等（IQR {iqr:.1f} ms），建议重测一次看是否稳定")
+    if iqr <= 15:
+        lines.append(f"OK 抖动小（IQR {iqr:.1f} ms），分布集中，结果可直接用")
+    elif iqr <= 40:
+        lines.append(f"~ 抖动中等（IQR {iqr:.1f} ms），建议重测一次看是否稳定")
     else:
         lines.append(
-            f"✗ 抖动大（IQR {iqr:.1f} ms）：通常是 CPU 抢占或屏幕刷新不同步，"
-            "关掉其他程序再测"
+            f"x 抖动大（IQR {iqr:.1f} ms）：通常是 CPU 抢占或自动曝光在变化，"
+            "关掉其他程序、锁死曝光后再测"
         )
+
+    drift = abs(stats.get("drift_ms", 0.0))
+    if drift > DRIFT_WARN_MS:
+        lines.append(
+            f"x 前后半段中位数差 {drift:.1f} ms（阈值 {DRIFT_WARN_MS:g} ms）："
+            "测量期间系统时钟被步进过，或相机在自动调整。关 NTP（timedatectl set-ntp false）"
+            "并锁曝光后重测"
+        )
+    else:
+        lines.append(f"OK 前后半段一致（差 {drift:.1f} ms），时间轴没有漂移")
 
     if detection_rate < 0.3:
         lines.append(
-            f"△ 解码率只有 {detection_rate * 100:.1f}%：二维码在画面里太小或失焦，"
+            f"~ 解码率只有 {detection_rate * 100:.1f}%：二维码在画面里太小或失焦，"
             "样本可能有偏"
         )
     else:
-        lines.append(f"✓ 解码率 {detection_rate * 100:.1f}%")
+        lines.append(f"OK 解码率 {detection_rate * 100:.1f}%")
 
     if samples_shown:
         lines.append(
-            f"· 本次共刷出 {samples_shown} 个不同二维码，"
+            f"- 本次共刷出 {samples_shown} 个不同二维码，"
             f"被拍到 {stats['samples']} 个（{stats['samples'] / samples_shown * 100:.1f}%）"
         )
     return lines
@@ -499,14 +557,16 @@ def write_outputs(
         "camera": {
             "id": result.camera_id,
             "device": meta.get("device_name"),
-            "backend": meta.get("backend"),
+            "backend": "linux",
             "width": meta.get("width"),
             "height": meta.get("height"),
             "fps_target": meta.get("fps"),
             "codec": meta.get("codec"),
             "frames": result.frames,
             "actual_fps": round(result.fps, 3),
-            "epoch_unix_ns": result.epoch_unix_ns,
+            # 原生 Ubuntu 的 pts 本身即墙钟，这里留空并与 WSL 路径字段对齐，便于对比两份 JSON。
+            "epoch_unix_ns": None,
+            "first_frame_unix_ns": result.first_ts_ns,
             "recorded_s": round(result.elapsed_s, 3),
         },
         "screen": {
@@ -587,13 +647,14 @@ def write_outputs(
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="测量相机（Windows/DirectShow 采集路径）的端到端延迟",
+        description="测量相机延迟（原生 Ubuntu / V4L2 采集路径）。WSL 路径用 measure_camera_latency_wsl.py",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "示例：\n"
-            "  python3.10 measure_camera_latency.py --list\n"
-            "  python3.10 measure_camera_latency.py --camera 0 --seconds 15\n"
-            "  python3.10 measure_camera_latency.py --camera 0 --seconds 20 --qr-size 1000\n"
+            "  python3.10 latency/measure_camera_latency.py --list\n"
+            "  python3.10 latency/measure_camera_latency.py --camera 0 --seconds 15\n"
+            "  python3.10 latency/measure_camera_latency.py --camera 1 --seconds 20 --qr-size 1000\n"
+            "  python3.10 latency/measure_camera_latency.py --camera 0 --device /dev/video4\n"
         ),
     )
     parser.add_argument("--list", action="store_true", help="只枚举相机，不测量")
@@ -608,17 +669,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="手动扣除的显示链路延迟（毫秒）；只影响 summary 里的修正值，不改原始统计",
     )
     parser.add_argument("--output-dir", type=Path, default=None, help="测量输出目录")
-    parser.add_argument("--ffmpeg", default=None, help="Linux ffmpeg（用于 ffprobe），默认查 PATH")
-    parser.add_argument("--ffmpeg-win", default=None, help="Windows ffmpeg.exe 路径")
-    parser.add_argument("--camera-backend", default=None, choices=CAMERA_BACKENDS,
-                        help="wsl = Windows DirectShow 采集；linux = /dev/videoN")
-    parser.add_argument("--width", type=int, default=None, help="默认取 cap_config.json")
-    parser.add_argument("--height", type=int, default=None, help="默认取 cap_config.json")
-    parser.add_argument("--fps", type=float, default=None, help="默认取 cap_config.json")
+    parser.add_argument("--ffmpeg", default=None, help="ffmpeg 路径，默认查 PATH / $FFMPEG")
+    parser.add_argument("--width", type=int, default=None, help="默认取 cap_config.yaml")
+    parser.add_argument("--height", type=int, default=None, help="默认取 cap_config.yaml")
+    parser.add_argument("--fps", type=float, default=None, help="默认取 cap_config.yaml")
     parser.add_argument("--video-codec", default=None, choices=VIDEO_CODECS,
-                        help="默认取 cap_config.json，通常 copy")
+                        help="默认取 cap_config.yaml，通常 copy")
     parser.add_argument("--device", default=None,
-                        help="直接指定 -i 参数（形如 video=@device_pnp_... 或 /dev/video0）")
+                        help="直接指定采集节点，形如 /dev/video4")
     return parser.parse_args(argv)
 
 
@@ -626,7 +684,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     config = load_cap_config()
 
-    backend = pick(args.camera_backend, config.get("camera_backend", "wsl"))
+    # 采集参数必须和 collect_cap.py 的 linux 分支一致，否则测的不是同一条链路。
     width = pick(args.width, config.get("camera_width", 1280))
     height = pick(args.height, config.get("camera_height", 720))
     fps = pick(args.fps, config.get("camera_fps", 30))
@@ -634,33 +692,30 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         ffmpeg_exe = find_ffmpeg(args.ffmpeg)
-        windows_ffmpeg = (
-            find_windows_ffmpeg(args.ffmpeg_win) if backend == "wsl" else None
-        )
     except RuntimeError as exc:
         warn(str(exc))
         return 2
 
-    try:
-        devices = resolve_devices(backend, args.camera, windows_ffmpeg or ffmpeg_exe)
-    except RuntimeError as exc:
-        warn(str(exc))
-        return 2
+    devices = resolve_devices()
 
     if args.list:
-        print(f"后端      {backend}")
+        print("后端      linux（V4L2 + -use_wallclock_as_timestamps 1）")
         print(f"ffmpeg    {ffmpeg_exe}  ({ffmpeg_version(ffmpeg_exe)})")
-        if windows_ffmpeg:
-            print(f"ffmpeg.exe {windows_ffmpeg}")
         print(f"采集参数  {width}x{height}@{fps:g}  codec={codec}")
         print("相机：")
+        if not devices:
+            print("  （没有 /sys/class/video4linux 节点：先确认相机已插上、"
+                  "用户已加入 video 组）")
         for index, (name, device_input) in enumerate(devices):
             print(f"  [{index}] {name}")
             print(f"      {device_input}")
         return 0
 
     if not devices:
-        warn("没有枚举到任何相机，检查 USB 连接与 --camera-backend")
+        warn(
+            "没有枚举到任何相机。检查：① 相机是否插上（ls /dev/video*）"
+            "② 当前用户是否在 video 组（id -nG）③ 是否装的是纯 WSL 环境"
+        )
         return 2
     if args.camera >= len(devices):
         warn(f"--camera {args.camera} 超出范围，当前只有 {len(devices)} 路")
@@ -669,6 +724,12 @@ def main(argv: list[str] | None = None) -> int:
     device_name, device_input = devices[args.camera]
     if args.device:
         device_input = args.device
+
+    try:
+        check_display()
+    except RuntimeError as exc:
+        warn(str(exc))
+        return 2
 
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_dir = (
@@ -680,16 +741,15 @@ def main(argv: list[str] | None = None) -> int:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     print("=" * 62)
-    print("相机延迟测量")
+    print("相机延迟测量（Linux / V4L2）")
     print("=" * 62)
     print(f"相机       [{args.camera}] {device_name}")
-    print(f"后端       {backend}")
     print(f"采集参数   {width}x{height}@{fps:g}  codec={codec}")
     print(f"录多久     {args.seconds:g} 秒")
     print(f"二维码     {args.qr_size} px / 目标 {args.qr_hz:g} Hz")
     print(f"输出       {output_dir}")
     print("-" * 62)
-    print("把二维码窗口对着相机，占画面四分之一以上；跑完按提示看结果。")
+    print("把二维码窗口拖到相机正前方，占画面四分之一以上；跑完按提示看结果。")
     print("=" * 62)
     time.sleep(1.0)
 
@@ -699,9 +759,7 @@ def main(argv: list[str] | None = None) -> int:
             device_name,
             device_input,
             output_dir,
-            backend,
             ffmpeg_exe,
-            windows_ffmpeg,
             width,
             height,
             fps,
@@ -726,7 +784,6 @@ def main(argv: list[str] | None = None) -> int:
     detection_rate = decoded / total if total else 0.0
     meta = {
         "device_name": device_name,
-        "backend": backend,
         "width": width,
         "height": height,
         "fps": fps,
@@ -741,37 +798,40 @@ def main(argv: list[str] | None = None) -> int:
     print(f"录制       {result.frames} 帧 / {result.elapsed_s:.1f} s / {result.fps:.1f} fps")
     refresh = len(result.samples) / result.elapsed_s if result.elapsed_s > 0 else 0.0
     print(f"屏幕       刷出 {len(result.samples)} 个二维码，实际 {refresh:.1f} Hz")
-    print(f"解码       {decoded} / {total} 帧解出码（{detection_rate * 100:.1f}%）")
+    print(f"解码       {decoded} / {total} 帧（{detection_rate * 100:.1f}%）")
     print(f"有效样本   {stats.get('samples', 0)}")
-    print()
+    print(f"首帧时刻   {datetime.fromtimestamp(result.first_ts_ns / 1e9).isoformat(timespec='milliseconds')}"
+          "（来自 V4L2 墙钟 pts，无需锚点）")
+    print("-" * 62)
 
     if stats.get("samples"):
-        print("Δ = 帧时间戳 − 拍摄时刻（含显示链路）")
-        print(f"  中位数    {stats['median_ms']:8.2f} ms   ← 建议填这个")
+        print("Δ = 帧时间戳 - 拍摄时刻（含显示链路）")
+        print(f"  中位数    {stats['median_ms']:8.2f} ms   <- 建议填这个")
         print(f"  均值      {stats['mean_ms']:8.2f} ms")
         print(f"  标准差    {stats['std_ms']:8.2f} ms")
         print(f"  P5 / P95  {stats['p05_ms']:8.2f} / {stats['p95_ms']:.2f} ms")
         print(f"  最小/最大 {stats['min_ms']:8.2f} / {stats['max_ms']:.2f} ms")
         print(f"  IQR       {stats['iqr_ms']:8.2f} ms")
-        print()
-        encode_mean = statistics.fmean([s.encode_ms for s in result.samples]) if result.samples else 0.0
-        imshow_mean = statistics.fmean([s.imshow_ms for s in result.samples]) if result.samples else 0.0
-        print("显示链路可观测开销（下界，实际还包含合成与屏幕刷新等待）")
-        print(f"  QR 编码+转图  {encode_mean:5.2f} ms")
-        print(f"  imshow+事件   {imshow_mean:5.2f} ms")
-        print()
+        print(f"  前后漂移  {stats['drift_ms']:8.2f} ms")
+        print("-" * 62)
+        if result.samples:
+            print("显示链路可观测开销（下界）")
+            print(f"  QR 编码+转图  {statistics.fmean([s.encode_ms for s in result.samples]):5.2f} ms")
+            print(f"  imshow+事件   {statistics.fmean([s.imshow_ms for s in result.samples]):5.2f} ms")
         if args.display_latency_ms:
-            corrected = stats["median_ms"] - args.display_latency_ms
-            print(f"扣掉 {args.display_latency_ms:g} ms 显示链路后：{corrected:.2f} ms")
-            print()
+            print(f"扣掉 {args.display_latency_ms:g} ms 显示链路后："
+                  f"{stats['median_ms'] - args.display_latency_ms:.2f} ms")
+        print("-" * 62)
         print("判读")
         for line in verdict(stats, detection_rate, len(result.samples)):
             print(f"  {line}")
     else:
         print("没有有效样本。常见原因：")
-        print("  · 二维码没进画面 —— 把窗口拖到相机正前方，放大到画面 1/4 以上")
-        print("  · 失焦或过曝 —— 手动对焦，别让屏幕反光糊成一片")
-        print("  · 分辨率/帧率不被设备支持 —— 先跑 --list 看枚举结果")
+        print("  - 二维码没进画面：窗口拖到相机正前方，放大到画面 1/4 以上")
+        print("  - 失焦或过曝：手动对焦，避开屏幕反光")
+        print("  - 相机权限：当前用户要在 video 组里（id -nG | grep video）")
+        if not result.samples:
+            print("  - 一个二维码都没刷出：窗口开不起来，检查 DISPLAY")
 
     print()
     print("输出文件")
@@ -781,9 +841,10 @@ def main(argv: list[str] | None = None) -> int:
     if paths["plot"]:
         print(f"  直方图     {paths['plot']}")
     print("=" * 62)
-    print("怎么用这个数：")
-    print("  timestamp_corrected = timestamp_unix_ns − 中位数（纳秒）")
-    print("  真实世界场景再扣掉显示链路那一段（--display-latency-ms）")
+    print("怎么用：")
+    print("  timestamp_unix_ns -= 中位数(ms) * 1e6      # 原生 Ubuntu 只有这一列")
+    print("  （linux 的 pts 已是墙钟，没有 timestamp_monotonic_ns 这一列）")
+    print("  注意：这个数只对原生 Ubuntu 路径有效；WSL 采集要用 measure_camera_latency_wsl.py 的读数")
     return 0 if stats.get("samples", 0) >= MIN_SAMPLES else 5
 
 

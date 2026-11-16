@@ -1,32 +1,49 @@
 #!/usr/bin/env python
-"""measure_camera_latency_win.py —— 相机延迟测量（Windows 原生版）
+"""measure_camera_latency_wsl.py —— 相机延迟测量（WSL 采集路径）
 
-和 WSL 版的区别
----------------
-全部跑在 Windows：二维码生成、窗口显示、ffmpeg.exe 调用、epoch 打点都用
-同一个 `time.time_ns()`。所以
+项目有两条采集路径，区别只在相机这一路怎么接：
+
+- **原生 Ubuntu**：ffmpeg 直读 ``/dev/videoN``（V4L2），用
+  ``latency/measure_camera_latency.py`` 测
+- **WSL**：Python 仍跑在 Linux 里，但相机借 Windows 的 ``ffmpeg.exe`` 走
+  DirectShow，就是本脚本
+
+本脚本要在 Windows 侧执行，原因不是「Windows 是另一个版本」，而是 WSL 路径的
+时间戳由两段拼成，必须在同一侧才能测：
+
+    timestamp_unix_ns = epoch_unix_ns + pts     # DirectShow 的 pts 从 0 起
+
+epoch 是「mkv 首次变大」时打的墙钟。所以
 
     Δ = (epoch + pts) − 码内时刻
 
-这个减法里的两个时刻本来就同源，**任何跨系统时钟差都自动抵消**，不需要
-知道 WSL 和 Windows 差多少（本机实测 0.3 ms，历史文档里的 1.61 s 是当时
-NTP 没同步的旧值）。即使差一分钟，只要在同一侧取，结果一样。
+这个减法里的两个时刻必须同源。本脚本把二维码生成、窗口显示、ffmpeg.exe 调用、
+epoch 打点全放在 Windows 侧，都用同一个 ``time.time_ns()``，**跨系统时钟差自动
+抵消**——不需要知道 WSL 和 Windows 差多少（本机实测 0.3 ms，历史文档里的 1.61 s
+是 NTP 没同步时的旧值）。即使差一分钟，只要在同一侧取，结果一样。
 
-比起 WSL 版还省掉两层开销：
-- 显示不再经过 WSLg 的 RDP 合成，窗口直接出在 Windows 桌面
+顺带省掉两层开销：
+- 显示不经过 WSLg 的 RDP 合成，窗口直接出在 Windows 桌面
 - epoch 检测从跨 9p 的 1.1 ms 降到本地 NTFS 的 0.5 ms（p50）
 
 测的是什么
 ---------
-    Δ = 曝光 + MJPEG 编码 + USB 传输 + 驱动缓冲 + ffmpeg 处理 + 显示链路
+    Δ = 显示链路 + 曝光 + MJPEG 编码 + USB 传输 + 驱动缓冲 + ffmpeg 处理
+        + 首帧编码落盘那一段
 
-采集端写的 ``timestamp_unix_ns = epoch_unix_ns + pts`` 整体偏晚这么多。
-下游把整条时间轴减掉 Δ，就回到接近曝光时刻。
+ffmpeg.exe 启动的那 1.4 秒**不在** Δ 里：WSL 路径没有用 ``-copyts``，ffmpeg 会把
+首帧的 pts 归零，实测首帧 pts 恰好是 0.0 ms，epoch 就落在首帧写出那一刻。所以这个
+Δ 是真的链路延迟，不是「锚点没对齐」的误差。
+
+两个数不可互换的原因不是差一个常数，而是基准不同：原生 Ubuntu 的 pts 是绝对墙钟，
+WSL 的 pts 是相对首帧、靠 epoch 平移。采集端写的
+``timestamp_unix_ns = epoch_unix_ns + pts`` 整体偏晚这么多，下游减掉 Δ 就回到接近
+曝光时刻。
 
 用法
 ----
-    python measure_camera_latency_win.py --list
-    python measure_camera_latency_win.py --camera 0 --seconds 15
+    python measure_camera_latency_wsl.py --list
+    python measure_camera_latency_wsl.py --camera 0 --seconds 15 --repeat 3
 
 依赖：opencv-python、qrcode、pillow、numpy（matplotlib 可选，用于画图）
 """
@@ -47,6 +64,7 @@ from datetime import datetime
 from pathlib import Path
 
 import numpy as np
+import yaml
 
 if hasattr(sys.stdout, "reconfigure"):
     # 不要强改成 UTF-8：PowerShell 5.1 / cmd 的控制台代码页是 936，按 UTF-8
@@ -58,7 +76,7 @@ if hasattr(sys.stdout, "reconfigure"):
 HERE = Path(__file__).resolve().parent
 # 配置与输出放在 Cap_Quest 根；sdk 在再上一层的 Paxini-Cap 下
 QUEST_ROOT = HERE.parent
-CONFIG_PATH = QUEST_ROOT / "cap_config.json"
+CONFIG_PATH = QUEST_ROOT / "cap_config.yaml"
 DEFAULT_OUTPUT_ROOT = QUEST_ROOT / "latency_measure"
 DEFAULT_FFMPEG = QUEST_ROOT.parent / "sdk" / "ffmpeg-win" / "ffmpeg.exe"
 
@@ -79,11 +97,11 @@ def load_cap_config() -> dict:
     if not CONFIG_PATH.is_file():
         return {}
     try:
-        raw = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+        raw = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8")) or {}
+    except (OSError, yaml.YAMLError) as exc:
         print(f"[警告] 读取 {CONFIG_PATH.name} 失败，用内置默认值：{exc}", file=sys.stderr)
         return {}
-    return {key: value for key, value in raw.items() if not key.startswith("_")}
+    return {str(key): value for key, value in raw.items() if not str(key).startswith("_")}
 
 
 def pick(value, fallback):
@@ -303,7 +321,7 @@ class Recording:
 
 
 def wait_first_byte(path: Path, process: subprocess.Popen, timeout_s: float) -> int:
-    """轮询直到文件首次变大，返回那一刻的 Windows 墙钟。
+    """轮询直到文件首次变大，返回那一刻的墙钟（本脚本在 Windows 侧，取到的是 Windows 时钟）。
 
     这就是采集端的 epoch：ffmpeg 把首帧写进容器的时刻。它晚于首帧被拍下，
     晚的那一段正是本程序要测的 Δ 的一部分。
@@ -707,12 +725,15 @@ def write_merged(
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="测量相机延迟（Windows 原生：QR 时间与 epoch 同在 Windows 时钟域）",
+        description=(
+            "测量相机延迟（WSL 采集路径：相机走 Windows 的 ffmpeg.exe + DirectShow，"
+            "本脚本在 Windows 侧执行，让 QR 时刻与 epoch 同源）"
+        ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "示例：\n"
-            "  python measure_camera_latency_win.py --list\n"
-            "  python measure_camera_latency_win.py --camera 0 --seconds 15\n"
+            "  python measure_camera_latency_wsl.py --list\n"
+            "  python measure_camera_latency_wsl.py --camera 0 --seconds 15 --repeat 3\n"
         ),
     )
     parser.add_argument("--list", action="store_true", help="只枚举相机")
@@ -779,20 +800,20 @@ def main(argv: list[str] | None = None) -> int:
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_dir = (
         args.output_dir if args.output_dir
-        else DEFAULT_OUTPUT_ROOT / f"{stamp}_win_cam{args.camera}"
+        else DEFAULT_OUTPUT_ROOT / f"{stamp}_wsl_cam{args.camera}"
     )
     output_dir = output_dir.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
-    camera_id = f"win_cam{args.camera}"
+    camera_id = f"wsl_cam{args.camera}"
 
     print("=" * 62)
-    print("相机延迟测量（Windows 原生）")
+    print("相机延迟测量（WSL 采集路径）")
     print("=" * 62)
     print(f"相机       [{args.camera}] {device_name}")
     print(f"采集参数   {width}x{height}@{fps:g}  codec={codec}")
     print(f"录多久     {args.seconds:g} 秒")
     print(f"二维码     {args.qr_size} px / 目标 {args.qr_hz:g} Hz")
-    print(f"时钟域     Windows（QR 与 epoch 同源）")
+    print(f"时钟域     Windows（本脚本在此执行，QR 与 epoch 同源）")
     print(f"输出       {output_dir}")
     print("-" * 62)
     print("把二维码窗口对准相机，占画面四分之一以上。")
