@@ -545,7 +545,7 @@ median = entry["median_ms"]            # 192.3
 - 换分辨率、帧率、codec、USB 口都要重测，脚本会把参数一并记下，`delta_prev_ms`
   给出与上一条同参数记录的差值，超过 20 ms 会当场提醒。
 - 每个 `latency_measure/<时间戳>_*/` 目录仍是本次的完整产物（逐帧 CSV、直方图、
-  录制的 mkv），台账里 `output_dir` 指回去。
+  录制的 mkv），台账里 `output_dir` 指回去；这些产物不入库，`output_dir` 只在本机有效。
 
 **不要拿另一个系统的时钟去换算。** WSL 与 Windows 的墙钟不一定对齐：本机 2026-11-16
 实测差 0.3 ms，但历史记录里出现过 1.61 s（NTP 没同步时就会这样）。稳妥做法是在同一个
@@ -607,9 +607,10 @@ ls -l /dev/serial/by-id/ /dev/ttyACM* /dev/ttyUSB* 2>/dev/null
 | 项 | 结果 |
 |---|---|
 | `py_compile` / `pyflakes` | 全过，0 告警 |
-| `selftest.py` | **102 项全过**（帧解析、Quest 四列时间戳、两条行轴、行数自检、`--omit-distribution`、实时视图推送、配置文件、相机双后端命令、相机单调钟写入、回放载荷的保峰抽稀/时钟漂移/空负载标记、相机首帧偏移/转码失败路径、MJPEG 拆帧与预览输出） |
+| `selftest.py` | **107 项全过**（帧解析、Quest 四列时间戳、两条行轴、行数自检、`--omit-distribution`、实时视图推送、YAML 配置与行内注释、相机后端 auto 判定、相机双后端命令、相机单调钟写入、回放载荷的保峰抽稀/时钟漂移/空负载标记、相机首帧偏移/转码失败路径、MJPEG 拆帧与预览输出） |
 | `--list-devices` | 正常输出串口 / V4L2 节点 / ffmpeg |
 | 无设备时报错 | 退出码 **2**，不创建 `recordings/` |
+| 相机延迟测量（WSL 路径） | 三次实测 189.71 / 287.22 / 192.30 ms，IQR 5~6 ms；台账 `latency/records/andy-win.yaml` |
 | 假 SDK 驱动真实主循环（python3.10，5 秒） | 602 行、**120.0 Hz**、`verify` 为空、`alignment: none` |
 | 回调耗时（60 秒合成帧） | 均值 0.21 ms、最大 0.62 ms |
 | 文件体积（合成数据） | 3.6 KB/行 ≈ 1.57 GB/小时（120 Hz，444 点全量） |
@@ -625,6 +626,9 @@ ls -l /dev/serial/by-id/ /dev/ttyACM* /dev/ttyUSB* 2>/dev/null
 - **标定是"没实现"而不是"没验证"**：相机内参/外参、手套→相机、Quest→相机四组量
   全部缺失，采集端不接触像素——见 [`../DOC/标定.md`](../DOC/标定.md) §2。没有这些，
   指尖三维位置、深度、跨源空间对齐都无从谈起。
+- **原生 Ubuntu 的延迟测量没在真机跑过**：`measure_camera_latency.py` 只过了编译、
+  `--list` 与合成视频验证（设定 42.7 ms 还原 42.7 ms），这台机器只有 WSL，没有
+  `/dev/video*`。
 - **手套零点标定没有真机记录**：`hand_calib.py` 写完但只在离线下验证（`selftest`
   7 项），没在真手套上跑过 `encoder` / `sensor` / `magnet`。默认阈值是按
   "静止噪声 <0.3°、空载摆动 <0.8 N"估的，**要用真机的 `info` 噪声底复核**——判据见

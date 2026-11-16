@@ -46,6 +46,8 @@ WSL 的 pts 是相对首帧、靠 epoch 平移。采集端写的
     python measure_camera_latency_wsl.py                  # 两路各 20 秒
     python measure_camera_latency_wsl.py --repeat 3       # 各 20 秒 x 3 轮，取合并值
 
+测量结论自动追加进 ``latency/records/<电脑用户>-win.yaml``，下游读最近的合格值。
+
 依赖：opencv-python、qrcode、pillow、numpy（matplotlib 可选，用于画图）
 """
 

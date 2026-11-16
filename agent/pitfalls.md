@@ -164,7 +164,7 @@ ffmpeg 归零到首帧，再靠 `epoch` 平移成绝对时间。Δ 也不是同�
 只有 `--view` 时才执行。`--help` 测不出来。
 
 **对策**：改了目录结构，除了 `--help`，还要跑一遍会用到的功能路径和
-`python3.10 selftest/selftest.py`（102 项能覆盖绝大部分 import 链）。
+`python3.10 selftest/selftest.py`（107 项能覆盖绝大部分 import 链）。
 
 ### 外面的脚本引用了里面的模块
 
