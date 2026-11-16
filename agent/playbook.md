@@ -76,7 +76,7 @@ Windows：
 ```powershell
 cd C:\Users\Andy\Desktop\paxini\Paxini-Cap\Cap_Quest
 & "C:\Users\Andy\AppData\Local\Programs\Python\Python312\python.exe" `
-  latency\measure_camera_latency_wsl.py --seconds 15 --repeat 3
+  latency\measure_camera_latency_wsl.py --repeat 3
 ```
 
 Ubuntu：
@@ -85,11 +85,12 @@ Ubuntu：
 cd <repo>/Paxini-Cap/Cap_Quest
 export PATH="$HOME/bin:$PATH"
 sudo timedatectl set-ntp false          # pts 走 CLOCK_REALTIME，测完记得开回来
-python3.10 latency/measure_camera_latency.py --seconds 15
+python3.10 latency/measure_camera_latency.py
 ```
 
-**默认逐路测 cam0 和 cam1**，不需要指定 `--camera`。枚举到的第 3 路（笔记本自带的
-`USB2.0 HD UVC WebCam`）不参与采集，脚本会自动跳过；只想测一路时加 `--camera 0`。
+**默认逐路测 cam0 和 cam1、每路录 20 秒**，所以上面两条命令都不带参数。枚举到的第 3 路
+（笔记本自带的 `USB2.0 HD UVC WebCam`）不参与采集，脚本会自动跳过；只想测一路加
+`--camera 0`，想改时长加 `--seconds N`。
 
 两路是不同 USB 口，延迟也不同，**各用各的，不要取平均**。跑完会打一张各路汇总表；
 某一路没有有效样本时，说明那一路没拍到二维码窗口，得调整相机朝向或单独重测。
