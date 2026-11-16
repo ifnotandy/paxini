@@ -540,6 +540,8 @@ median = entry["median_ms"]            # 192.3
 ```
 
 - `pick_latest` 默认跳过 `ok: false` 的记录；两路相机延迟不同，`camera` 必须指明。
+- **默认逐路测 cam0 和 cam1**，不用加参数。第 3 路起（笔记本自带的
+  `USB2.0 HD UVC WebCam`）不参与采集，脚本直接跳过；只测一路用 `--camera 0` / `1`。
 - 换分辨率、帧率、codec、USB 口都要重测，脚本会把参数一并记下，`delta_prev_ms`
   给出与上一条同参数记录的差值，超过 20 ms 会当场提醒。
 - 每个 `latency_measure/<时间戳>_*/` 目录仍是本次的完整产物（逐帧 CSV、直方图、

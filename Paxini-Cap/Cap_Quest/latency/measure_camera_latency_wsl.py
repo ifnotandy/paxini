@@ -82,6 +82,9 @@ CONFIG_PATH = QUEST_ROOT / "cap_config.yaml"
 DEFAULT_OUTPUT_ROOT = QUEST_ROOT / "latency_measure"
 DEFAULT_FFMPEG = QUEST_ROOT.parent / "sdk" / "ffmpeg-win" / "ffmpeg.exe"
 
+# 采集只接两路外接相机（cam0 / cam1）；电脑自带摄像头不参与采集，不测。
+CAPTURE_SLOTS = 2
+
 MIN_SAMPLES = 30
 COMFORTABLE_SAMPLES = 100
 QR_TEXT_MIN_LEN = 18
@@ -735,11 +738,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         epilog=(
             "示例：\n"
             "  python measure_camera_latency_wsl.py --list\n"
-            "  python measure_camera_latency_wsl.py --camera 0 --seconds 15 --repeat 3\n"
+            "  python measure_camera_latency_wsl.py --seconds 15   # 两路都测（默认）\n"
         ),
     )
     parser.add_argument("--list", action="store_true", help="只枚举相机")
-    parser.add_argument("--camera", type=int, default=0, help="第几路相机，默认 0")
+    parser.add_argument(
+        "--camera",
+        type=int,
+        default=None,
+        help="只测第几路；不填则测 cam0 和 cam1（两路延迟不同，默认都测）",
+    )
     parser.add_argument("--seconds", type=float, default=15.0, help="录制时长，默认 15 秒")
     parser.add_argument("--qr-size", type=int, default=800, help="二维码窗口边长，默认 800 px")
     parser.add_argument("--qr-hz", type=float, default=100.0, help="目标刷新率，默认 100 Hz")
@@ -767,61 +775,36 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def main(argv: list[str] | None = None) -> int:
-    args = parse_args(argv)
-    config = load_cap_config()
+def measure_one(
+    index: int,
+    device_name: str,
+    device_input: str,
+    args: argparse.Namespace,
+    width: int,
+    height: int,
+    fps: float,
+    codec: str,
+    ffmpeg_exe: str,
+    stamp: str,
+    multi: bool,
+) -> dict:
+    """测一路相机（含 --repeat 多轮）：录制 → 解码 → 落盘 → 记账。
 
-    width = pick(args.width, config.get("camera_width", 1280))
-    height = pick(args.height, config.get("camera_height", 720))
-    fps = pick(args.fps, config.get("camera_fps", 30))
-    codec = pick(args.video_codec, config.get("video_codec", "copy"))
-
-    try:
-        ffmpeg_exe = find_ffmpeg(args.ffmpeg)
-        devices = discover_cameras(ffmpeg_exe)
-    except RuntimeError as exc:
-        print(f"[警告] {exc}", file=sys.stderr)
-        return 2
-
-    if args.list:
-        print(f"ffmpeg.exe  {ffmpeg_exe}")
-        print(f"采集参数    {width}x{height}@{fps:g}  codec={codec}")
-        print("相机：")
-        for index, (name, device_input) in enumerate(devices):
-            print(f"  [{index}] {name}")
-            print(f"      {device_input}")
-        return 0
-
-    if not devices:
-        print("[警告] 没有枚举到相机", file=sys.stderr)
-        return 2
-    if args.camera >= len(devices):
-        print(f"[警告] --camera {args.camera} 超出范围，只有 {len(devices)} 路", file=sys.stderr)
-        return 2
-
-    device_name, device_input = devices[args.camera]
-    if args.device:
-        device_input = args.device
-
-    try:
-        check_gui()
-    except RuntimeError as exc:
-        print(f"[警告] {exc}", file=sys.stderr)
-        return 2
-
-    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_dir = (
-        args.output_dir if args.output_dir
-        else DEFAULT_OUTPUT_ROOT / f"{stamp}_wsl_cam{args.camera}"
-    )
+    逐路独立起停：某一路失败不影响另一路出结果，最后按最严重的那一路给退出码。
+    """
+    if args.output_dir:
+        # 多路时每路一个子目录，否则两路的产物会混在一起
+        output_dir = args.output_dir / f"cam{index}" if multi else args.output_dir
+    else:
+        output_dir = DEFAULT_OUTPUT_ROOT / f"{stamp}_wsl_cam{index}"
     output_dir = output_dir.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
-    camera_id = f"wsl_cam{args.camera}"
+    camera_id = f"wsl_cam{index}"
 
     print("=" * 62)
-    print("相机延迟测量（WSL 采集路径）")
+    print(f"相机延迟测量（WSL 采集路径）第 {index + 1} 路")
     print("=" * 62)
-    print(f"相机       [{args.camera}] {device_name}")
+    print(f"相机       [{index}] {device_name}")
     print(f"采集参数   {width}x{height}@{fps:g}  codec={codec}")
     print(f"录多久     {args.seconds:g} 秒")
     print(f"二维码     {args.qr_size} px / 目标 {args.qr_hz:g} Hz")
@@ -875,19 +858,19 @@ def main(argv: list[str] | None = None) -> int:
                     time.sleep(3.0)
             except Exception as exc:  # cv2.error 等
                 print(f"[警告] 采集中断：{type(exc).__name__}: {exc}", file=sys.stderr)
-                return 3
+                return {"camera": index, "stats": {"samples": 0}, "code": 3}
         if recording is None:
-            print(f"[警告] 采集失败：{last_error}", file=sys.stderr)
-            return 3
+            print(f"[警告] 第 {index} 路采集失败：{last_error}", file=sys.stderr)
+            return {"camera": index, "stats": {"samples": 0}, "code": 3}
 
         try:
             stamps = probe_pts(ffmpeg_exe, recording.video_path)
         except RuntimeError as exc:
-            print(f"[警告] pts 提取失败：{exc}", file=sys.stderr)
-            return 4
+            print(f"[警告] 第 {index} 路 pts 提取失败：{exc}", file=sys.stderr)
+            return {"camera": index, "stats": {"samples": 0}, "code": 4}
         if not stamps:
-            print("[警告] 视频里没有可读帧", file=sys.stderr)
-            return 4
+            print(f"[警告] 第 {index} 路视频里没有可读帧", file=sys.stderr)
+            return {"camera": index, "stats": {"samples": 0}, "code": 4}
         # DirectShow 的 pts 从 0 起，加 epoch 还原绝对时刻。
         recording.timestamps_ns = [recording.epoch_unix_ns + value for value in stamps]
         print(f"[INFO] {recording.frames} 帧 / {recording.actual_fps:.1f} fps", flush=True)
@@ -896,8 +879,8 @@ def main(argv: list[str] | None = None) -> int:
         try:
             hits, total, decoded = decode_video(recording)
         except RuntimeError as exc:
-            print(f"[警告] 解码失败：{exc}", file=sys.stderr)
-            return 4
+            print(f"[警告] 第 {index} 路解码失败：{exc}", file=sys.stderr)
+            return {"camera": index, "stats": {"samples": 0}, "code": 4}
 
         round_stats = summarize(hits)
         rounds.append({
@@ -934,7 +917,7 @@ def main(argv: list[str] | None = None) -> int:
         try:
             recorded = record_measurement(
                 platform="win",
-                camera=args.camera,
+                camera=index,
                 stats=stats,
                 meta={**meta, "seconds": args.seconds},
                 output_dir=output_dir,
@@ -945,10 +928,11 @@ def main(argv: list[str] | None = None) -> int:
                 clock_domain="windows（QR 时间与 epoch 同为 time.time_ns）",
             )
         except (OSError, RuntimeError) as exc:
-            print(f"[警告] 测量记录没写成功，本次产物不受影响：{exc}", file=sys.stderr)
+            print(f"[警告] 第 {index} 路测量记录没写成功，本次产物不受影响：{exc}",
+                  file=sys.stderr)
 
     print("=" * 62)
-    print("结果")
+    print(f"第 {index} 路结果")
     print("=" * 62)
     if args.repeat > 1:
         print(f"轮次       {args.repeat} 轮，共 {frames_total} 帧")
@@ -962,7 +946,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"录制       {recording.frames} 帧 / {recording.elapsed_s:.1f} s / "
               f"{recording.actual_fps:.1f} fps")
         print(f"epoch 锚定 进程启动→首字节 {recording.epoch_delay_ms:.1f} ms"
-              "（这个数直接进 Δ，轮间波动主要来自它）")
+              "（不进 Δ：首帧 pts 归零，epoch 落在首帧写出那一刻）")
     print(f"解码       {decoded_total} / {frames_total} 帧（{detection_rate * 100:.1f}%）")
     print(f"有效样本   {stats.get('samples', 0)}")
     print("-" * 62)
@@ -1018,16 +1002,119 @@ def main(argv: list[str] | None = None) -> int:
         if delta is not None and abs(delta) > DELTA_WARN_MS:
             before = entry["median_ms"] - delta
             print(
-                f"[警告] 与上一条合格记录差 {delta:+.1f} ms"
+                f"[警告] cam{index} 与上一条合格记录差 {delta:+.1f} ms"
                 f"（{before:.2f} → {entry['median_ms']:.2f}）。环境没变的话重测一次确认："
                 "驱动缓冲、自动曝光、换 USB 口都会让整条时间轴整体平移",
                 file=sys.stderr,
             )
     print("=" * 62)
+
+    return {
+        "camera": index,
+        "stats": stats,
+        "detection_rate": detection_rate,
+        "recorded": recorded,
+        "code": 0 if stats.get("samples", 0) >= MIN_SAMPLES else 5,
+    }
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    config = load_cap_config()
+
+    width = pick(args.width, config.get("camera_width", 1280))
+    height = pick(args.height, config.get("camera_height", 720))
+    fps = pick(args.fps, config.get("camera_fps", 30))
+    codec = pick(args.video_codec, config.get("video_codec", "copy"))
+
+    try:
+        ffmpeg_exe = find_ffmpeg(args.ffmpeg)
+        devices = discover_cameras(ffmpeg_exe)
+    except RuntimeError as exc:
+        print(f"[警告] {exc}", file=sys.stderr)
+        return 2
+
+    if args.list:
+        print(f"ffmpeg.exe  {ffmpeg_exe}")
+        print(f"采集参数    {width}x{height}@{fps:g}  codec={codec}")
+        print("相机：")
+        for index, (name, device_input) in enumerate(devices):
+            print(f"  [{index}] {name}")
+            print(f"      {device_input}")
+        if devices:
+            print("默认        测 cam0 和 cam1（前两路外接相机）；只想测一路用 --camera N")
+        return 0
+
+    if not devices:
+        print("[警告] 没有枚举到相机", file=sys.stderr)
+        return 2
+
+    # 只测采集在用的那两路（cam0 / cam1）。电脑自带的摄像头即使被枚举到也不测：
+    # 它不参与采集，测出来的数没有用处，还白占一段录制时间。
+    if args.camera is None:
+        targets = list(range(min(CAPTURE_SLOTS, len(devices))))
+        if len(devices) > CAPTURE_SLOTS:
+            print(f"[INFO] 枚举到 {len(devices)} 路，只测前两路 cam0/cam1；"
+                  f"要测别的用 --camera N")
+    else:
+        if args.camera < 0 or args.camera >= len(devices):
+            print(f"[警告] --camera {args.camera} 超出范围，只有 {len(devices)} 路",
+                  file=sys.stderr)
+            return 2
+        targets = [args.camera]
+
+    if args.device and len(targets) > 1:
+        print("[警告] --device 只能配合 --camera 单路使用；本次忽略它，按枚举到的相机逐路测",
+              file=sys.stderr)
+
+    try:
+        check_gui()
+    except RuntimeError as exc:
+        print(f"[警告] {exc}", file=sys.stderr)
+        return 2
+
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    multi = len(targets) > 1
+    if multi:
+        print("本次逐路测量 %d 路相机：%s" % (len(targets), "、".join(f"cam{i}" for i in targets)))
+
+    results = []
+    for index in targets:
+        device_name, device_input = devices[index]
+        if args.device and not multi:
+            device_input = args.device
+        results.append(
+            measure_one(
+                index, device_name, device_input, args,
+                width, height, fps, codec, ffmpeg_exe, stamp, multi,
+            )
+        )
+
+    if multi:
+        print()
+        print("=" * 62)
+        print("各路汇总（两路是不同 USB 口，各用各的，不要取平均）")
+        print("=" * 62)
+        for item in results:
+            stats = item["stats"]
+            if stats.get("samples"):
+                state = "合格" if item["code"] == 0 else "样本不足"
+                print(f"  cam{item['camera']}  {stats['median_ms']:8.2f} ms   "
+                      f"IQR {stats['iqr_ms']:5.2f}   n={stats['samples']:<4} {state}")
+            else:
+                print(f"  cam{item['camera']}  没有有效样本（原因见上方）")
+
+    print("=" * 62)
     print("怎么用：")
-    print("  timestamp_corrected = timestamp_unix_ns - 中位数(ms) * 1e6")
-    print("  timestamp_monotonic_ns 同样减这个量")
-    return 0 if stats.get("samples", 0) >= MIN_SAMPLES else 5
+    print("  时间轴减掉**对应那一路**的中位数：cam0 用 cam0 的数，cam1 用 cam1 的数")
+    print("  timestamp_unix_ns       -= 中位数(ms) * 1e6")
+    print("  timestamp_monotonic_ns  同样减这个量")
+    print("  之后再用就甭重测了，直接从 latency/records/ 读最近一次合格值")
+    codes = [item["code"] for item in results]
+    for bad in (4, 3, 5):
+        if bad in codes:
+            return bad
+    return 0
 
 
 if __name__ == "__main__":
