@@ -62,6 +62,8 @@ WSL 路径的 pts 从 0 起（没有 ``-copyts``，ffmpeg 把首帧归零），�
     python3.10 latency/measure_camera_latency.py --list
     python3.10 latency/measure_camera_latency.py            # 两路各 20 秒
 
+测量结论自动追加进 ``latency/records/<电脑用户>-ubuntu.yaml``，下游读最近的合格值。
+
 把二维码窗口拖到相机正前方，占画面四分之一以上；按 q 可提前结束。
 
 注意：pts 来自 ``CLOCK_REALTIME``，测量期间若 NTP 步进一次系统时间，那段时间

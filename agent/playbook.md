@@ -14,7 +14,7 @@ export PATH="$HOME/bin:$PATH"
 python3.10 capture/collect_cap.py --list-devices    # 串口末尾应是 PXCap
 
 # 2) 不接硬件先自检
-python3.10 selftest/selftest.py                     # 102 项
+python3.10 selftest/selftest.py                     # 107 项
 
 # 3) 关 NTP（必须）
 sudo timedatectl set-ntp false
@@ -140,7 +140,7 @@ python3.10 viewer/visualize.py recordings/data_20261113_9 --save-png a.png
 cd Paxini-Cap/Cap_Quest
 python3.10 -m py_compile capture/*.py viewer/*.py selftest/*.py latency/*.py calib/*.py
 python3.10 -m pyflakes  capture/*.py viewer/*.py selftest/*.py latency/*.py calib/*.py
-python3.10 selftest/selftest.py                      # 102 项（加过用例就是 103+）
+python3.10 selftest/selftest.py                      # 107 项（加过用例会更多）
 ```
 
 三关都过再提交。改过行为或数据结构，`selftest` 必须加用例，不能只靠手跑过一遍。

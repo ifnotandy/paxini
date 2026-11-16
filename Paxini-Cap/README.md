@@ -11,7 +11,7 @@ Paxini-Cap/
 │   ├── calib/              # 手套零点标定
 │   ├── latency/            # 相机延迟测量
 │   ├── viewer/             # 回放与实时视图
-│   ├── selftest/           # 不接硬件的自检，102 项
+│   ├── selftest/           # 不接硬件的自检，107 项
 │   ├── scripts/            # 一键采集脚本
 │   ├── recordings/         # 采集输出（data_<日期>_<序号>/）
 │   ├── latency/            # 延迟测量：两个脚本 + records/ 台账（一台机器一个文件）
@@ -39,7 +39,7 @@ Paxini-Cap/
 
 **当前状态**：真机（手套 + 双路相机）已跑通，但 **Quest 整组未测、标定功能不存在**
 ——这两块补上之前，跨源对齐与任何"距离 / 位置 / 三维"的结论都不成立。逐项状态见
-§6 与 [`DOC/待验证清单.md`](DOC/待验证清单.md)。102 项 `selftest.py` 只覆盖纯逻辑
+§6 与 [`DOC/待验证清单.md`](DOC/待验证清单.md)。107 项 `selftest.py` 只覆盖纯逻辑
 （帧解析、行轴、配置、视图挂钩）；下游 `Paxini-Align/` 还没开工，仓库里没有配对代码。
 
 ### 0.1 不能违反的约定
@@ -97,7 +97,7 @@ Paxini-Cap/
 cd Cap_Quest
 python3.10 -m py_compile capture/*.py viewer/*.py selftest/*.py latency/*.py calib/*.py
 python3.10 -m pyflakes capture/*.py viewer/*.py selftest/*.py latency/*.py calib/*.py
-python3.10 selftest/selftest.py          # 应为 102 项全过
+python3.10 selftest/selftest.py          # 应为 107 项全过
 ```
 
 - 改数据结构或行为，**必须加 selftest 用例**，不能只靠手跑
@@ -147,7 +147,7 @@ sudo /usr/share/pxhandsdk/scripts/setup-serial-access.sh
 python3.10 -m pip install --user -r requirements.txt
 ```
 
-装完先跑 §0.4 的三关：`selftest` 102 项全过说明环境没问题，此时不需要插硬件。
+装完先跑 §0.4 的三关：`selftest` 107 项全过说明环境没问题，此时不需要插硬件。
 
 **验证设备与日常运行不在本文档**：`--list-devices`、采集、`--view`、一键脚本、回放、
 参数表全在 [`Cap_Quest/README.md` §1](Cap_Quest/README.md)。采前关 NTP、
@@ -159,7 +159,7 @@ python3.10 -m pip install --user -r requirements.txt
 **结论：采集链路可用，跨源分析不可用。**
 
 真机（手套 + 双路相机）2026-11-13 已跑通，逐帧无丢帧、关 NTP 后时钟零跳变；不接
-硬件时 `selftest` 102 项全过。但三处缺口没补上之前，任何跨源结论都不成立：
+硬件时 `selftest` 107 项全过。但三处缺口没补上之前，任何跨源结论都不成立：
 
 | 缺口 | 状态 | 后果 |
 |---|---|---|

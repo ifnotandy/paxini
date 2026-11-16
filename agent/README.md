@@ -44,7 +44,7 @@ Paxini-Dex/   会运动
 | Cap 回放（Tk / HTML） | 可用 |
 | Cap 实时视图（`--view`） | 可用 |
 | 手套零点标定 | 代码有，**无真机记录** |
-| 相机延迟测量 | 可用，实测约 191 ms（见 `latency/`） |
+| 相机延迟测量 | 可用，WSL 路径实测 190~290 ms（整条链路会跳档，取 `latency/records/` 最近值） |
 | Quest 采集 | **未测**（无头显） |
 | 相机内参/外参 | **不存在** |
 | 跨源对齐 | **不存在**（设计给了下游 `Paxini-Align/`，未开工） |
@@ -60,6 +60,7 @@ Paxini-Dex/   会运动
 | `data.h5` 里某个字段是什么 | `Paxini-Cap/DOC/HDF5结构说明.md` | 其他都是摘要 |
 | 某列时间戳是什么时钟、怎么换算 | `Paxini-Cap/DOC/时间戳说明.md` | 其他都是摘要 |
 | 某项测过没有、实测值多少 | `Paxini-Cap/DOC/待验证清单.md` | README 只给结论 |
+| 相机延迟该用哪个数 | `Paxini-Cap/Cap_Quest/latency/records/<机器>.yaml` | README 只给量级，脚本负责写入 |
 | 标定要采哪几组量 | `Paxini-Cap/DOC/标定.md` | — |
 | 某个参数什么意思 | `Paxini-Cap/Cap_Quest/README.md` §6.2 | `--help` 也是权威 |
 | 怎么开发、不能违反什么 | `Paxini-Cap/README.md` §0 | 本目录是补充 |
