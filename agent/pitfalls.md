@@ -108,8 +108,20 @@ python -m pip install --force-reinstall --no-deps opencv-python
 **根因**：没做相机延迟标定，或用的是别人机器上的默认值。
 
 **对策**：跑对应采集路径的测量脚本（原生 Ubuntu → `measure_camera_latency.py`，WSL →
-`measure_camera_latency_wsl.py`），中位数填进去。改了分辨率、帧率、codec、USB 口、机器
-都要重测。
+`measure_camera_latency_wsl.py`），数从 `latency/records/` 里取最近一次的合格值
+（`pick_latest(load_records(), camera=0)`），别抄文档里的数字。改了分辨率、帧率、
+codec、USB 口、机器都要重测。
+
+### 用了几个月前的 Δ，时间轴整体偏 100 ms
+
+**根因**：同一台机器、同一套参数，读数也会整体跳一档。2026-11-16 连测三次：
+189.7 → 287.2 → 192.3 ms，三次 IQR 都只有 5~6 ms。变的不是抖动，是 DirectShow
+缓冲深度（那一次多了约 3 帧）。把某一次的读数当常量写死，隔几个月就对不上。
+
+**识别**：和「偏几百毫秒」一样 —— 行数、间隔、单调性全正常，只有对齐错。
+
+**对策**：下游现场读 `latency/records/<机器>.yaml` 取最近一次 `ok: true`；记录里的
+`delta_prev_ms` 超过 20 ms 说明链路变过，别直接拿去修时间轴，先重测确认。
 
 ### 原生 Ubuntu 采的数据减了 WSL 测的 Δ，时间轴整体平移
 

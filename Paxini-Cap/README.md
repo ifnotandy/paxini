@@ -14,6 +14,7 @@ Paxini-Cap/
 │   ├── selftest/           # 不接硬件的自检，102 项
 │   ├── scripts/            # 一键采集脚本
 │   ├── recordings/         # 采集输出（data_<日期>_<序号>/）
+│   ├── latency/            # 延迟测量：两个脚本 + records/ 台账（一台机器一个文件）
 │   └── cap_config.yaml     # 可选配置（存在即加载，命令行优先）
 ├── DOC/                # 文档（格式说明、时钟说明、待验证清单、标定）
 │   ├── README.md           # 文档索引 + 阅读顺序 + 维护约定
