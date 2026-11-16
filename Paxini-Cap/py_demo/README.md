@@ -9,7 +9,7 @@
 | `stream_demo.py` | 连续采集，每 0.5 秒打印帧数/关节角/拇指合力，结束给实际频率与帧间隔分布 | `pxhandsdk` |
 | `camera.py` | 枚举 V4L2 节点，ffmpeg 录 N 秒，ffprobe 回读帧数/分辨率/实际 fps/帧间隔/首末帧墙钟 | `pxhandsdk` 之外的 ffmpeg/ffprobe |
 
-`camera.py` 直接复用 `../Cap_Quest/camera_ffmpeg.py`，和主程序用同一套采集逻辑，
+`camera.py` 直接复用 `../Cap_Quest/capture/camera_ffmpeg.py`，和主程序用同一套采集逻辑，
 避免两份代码对时间戳的处理不一致。
 
 ## 1. 前置条件

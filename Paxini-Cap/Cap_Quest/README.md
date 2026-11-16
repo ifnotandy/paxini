@@ -24,28 +24,49 @@ ffmpeg 让每帧 pts 直接取主机墙钟并原样写进容器，停止后用 `
 > 里面有代码地图、不能违反的约定、环境坑和提交前必过的三关。本文件讲怎么用，
 > 根 README §0 讲怎么改。
 
+## 0. 目录结构
+
+2026-11-16 按用途拆过目录。**下面所有命令都在 `Cap_Quest/` 根目录下执行**，
+文件名带目录前缀。
+
+| 目录 | 内容 | 入口 |
+|---|---|---|
+| `capture/` | 采集主程序与设备驱动层 | `collect_cap.py`（主）、`camera_ffmpeg.py`、`quest3.py` |
+| `calib/` | 手套零点标定（写设备存储；报告落 `../calib/hand/`） | `hand_calib.py` |
+| `latency/` | 相机延迟测量 | `measure_camera_latency_win.py`（Windows 原生）、`measure_camera_latency.py`（WSL） |
+| `viewer/` | 可视化 | `visualize.py`（回放）、`live_view.py`（实时） |
+| `selftest/` | 不接硬件的自检 | `selftest.py` |
+| `scripts/` | 一键脚本 | `run_capture_noquest.sh` |
+| `recordings/` | 采集输出（`data_<日期>_<序号>/`） | — |
+| `cap_config.json` | 采集配置，采集 / 延时测量 / 标定三处共用 | — |
+
+跨目录依赖靠各脚本开头的 `sys.path` 注入解决：`viewer/`、`selftest/`、`latency/`
+都会把 `capture/` 加进搜索路径。`calib/` 只依赖 SDK，不引用采集模块，跟 `capture/`
+没有耦合。`scripts/run_capture_noquest.sh` 自己 `cd` 到 `capture/`，它内部的路径都
+相对脚本位置解析，从哪个目录调用都行。
+
 ## 1. 快速开始
 
 ```bash
 cd Paxini-Cap/Cap_Quest
 export PATH="$HOME/bin:$PATH"          # 静态版 ffmpeg/ffprobe
-python3.10 collect_cap.py --list-devices
+python3.10 capture/collect_cap.py --list-devices
 ```
 
 `--list-devices` 打印串口（含 USB VID:PID 与 by-id）、V4L2 采集节点和 ffmpeg 版本。
 确认手套串口那行末尾是 `PXCap`（`USB=28e9:018a`）后再运行：
 
 ```bash
-python3.10 collect_cap.py --cap-side right --pose-source controller --pose-side right
+python3.10 capture/collect_cap.py --cap-side right --pose-source controller --pose-side right
 ```
 
 常见变体：
 
 ```bash
-python3.10 collect_cap.py --duration 60        # 采 60 秒后自动停
-python3.10 collect_cap.py --camera-mode cam0   # 只录一路，排除带宽问题
-python3.10 collect_cap.py --no-quest           # 没有头显时只采手套 + 相机
-python3.10 collect_cap.py --camera-mode none   # 不录视频
+python3.10 capture/collect_cap.py --duration 60        # 采 60 秒后自动停
+python3.10 capture/collect_cap.py --camera-mode cam0   # 只录一路，排除带宽问题
+python3.10 capture/collect_cap.py --no-quest           # 没有头显时只采手套 + 相机
+python3.10 capture/collect_cap.py --camera-mode none   # 不录视频
 ```
 
 启动顺序（任一环节失败都在开始采集前退出，不留半截数据）：
@@ -67,11 +88,11 @@ python3.10 collect_cap.py --camera-mode none   # 不录视频
 的场景。有头显时仍直接跑 `collect_cap.py`。
 
 ```bash
-bash run_capture_noquest.sh                  # 一直采，Ctrl+C 停（只按一次）
-bash run_capture_noquest.sh -d 60            # 采 60 秒
-bash run_capture_noquest.sh -d 60 --view     # 边采边看
-bash run_capture_noquest.sh -d 10 --dry-run  # 只做检查并打印命令，不启动
-bash run_capture_noquest.sh -- --video-codec h264   # 其余参数写在 -- 之后透传
+bash scripts/run_capture_noquest.sh                  # 一直采，Ctrl+C 停（只按一次）
+bash scripts/run_capture_noquest.sh -d 60            # 采 60 秒
+bash scripts/run_capture_noquest.sh -d 60 --view     # 边采边看
+bash scripts/run_capture_noquest.sh -d 10 --dry-run  # 只做检查并打印命令，不启动
+bash scripts/run_capture_noquest.sh -- --video-codec h264   # 其余参数写在 -- 之后透传
 ```
 
 它比手工敲多了四层保护：找不到 `python3.10`/`PXCap3`、找不到 `ffmpeg` 或 `ffprobe`、
@@ -84,7 +105,7 @@ usbipd 的 attach 随之失效，而 `usbipd list` 仍显示 `Attached`。脚本
 `/dev/ttyACM0` 在不在；不在就 `detach` → `attach` → 轮询节点最多 3 秒，最多试 5 轮。
 `detach` 之后设备会重新枚举，紧接着 `attach` 会报 `There is no device with busid`，
 所以必须先重试而不是判一次就放弃。busid 从 `usbipd list` 里按 `28e9:018a` 自动查，
-换机器或换 USB 口不用改脚本；要指定就 `USBIPD_BUSID=3-3 bash run_capture_noquest.sh`。
+换机器或换 USB 口不用改脚本；要指定就 `USBIPD_BUSID=3-3 bash scripts/run_capture_noquest.sh`。
 
 脚本不写 `~/bin` 这种个人路径：ffmpeg 按 `$FFMPEG` → `PATH` → `~/bin`、`/usr/local/bin`
 等常见位置查找，找到后把它的目录加到 `PATH` 最前面，`ffprobe` 优先取同目录的那份。
@@ -200,9 +221,9 @@ HDF5 只存索引性质的时间戳。
 `visualize.py` 直接读采集目录，不需要重新解码视频：
 
 ```bash
-python3.10 visualize.py recordings/data_<日期>_<序号>          # Tk 窗口
-python3.10 visualize.py recordings/data_<日期>_<序号> --html   # 导出 viewer.html
-python3.10 visualize.py recordings/data_<日期>_<序号> --save-png run.png
+python3.10 viewer/visualize.py recordings/data_<日期>_<序号>          # Tk 窗口
+python3.10 viewer/visualize.py recordings/data_<日期>_<序号> --html   # 导出 viewer.html
+python3.10 viewer/visualize.py recordings/data_<日期>_<序号> --save-png run.png
 ```
 
 - 窗口里三张曲线（关节角 / 合力模长 1~5 路 / 合力模长 6~10 路）+ 右侧一张
@@ -280,9 +301,9 @@ python3.10 visualize.py recordings/data_<日期>_<序号> --save-png run.png
 采集时加 `--view`，边录边看：
 
 ```bash
-python3.10 collect_cap.py --cap-side right --view                    # auto：按系统自己选
-python3.10 collect_cap.py --cap-side right --view --view-mode html   # 强制浏览器版
-python3.10 collect_cap.py --cap-side right --view --view-mode tk     # 强制 matplotlib 窗口
+python3.10 capture/collect_cap.py --cap-side right --view                    # auto：按系统自己选
+python3.10 capture/collect_cap.py --cap-side right --view --view-mode html   # 强制浏览器版
+python3.10 capture/collect_cap.py --cap-side right --view --view-mode tk     # 强制 matplotlib 窗口
 ```
 
 **`--view-mode auto`（默认）按平台落点：**
@@ -378,7 +399,7 @@ HTTP 服务、页面、JPEG 缓冲、MJPEG 连接全在子进程里。两处细�
 - **字段级说明在文件里**：`_可选项说明` 逐字段写「取值 / 默认 / 影响 / 坑」，
   `_生效条件` 写清哪些字段在什么前提下才起作用（比如 `view_video_*` 要 `view` 且
   `camera_mode ≠ none`）。改配置前先看这两块，不要只照抄参数表。
-- 换一份：`python3.10 collect_cap.py --config /path/to/other.json`。
+- 换一份：`python3.10 capture/collect_cap.py --config /path/to/other.json`。
 - 未知键、非法选项值、布尔写成 `"yes"` 都会直接报错退出（退出码 2），不静默忽略。
 - 改完想确认最终生效值：`--help` 里显示的 `(default: ...)` 就是配置文件改写后的默认值。
 
@@ -463,9 +484,13 @@ ffmpeg/ffprobe 从 `PATH` 找（也认环境变量 `FFMPEG`），所以先
 帧的绝对时刻 = cameras.<id>.epoch_unix_ns + pts
 ```
 
-`epoch` 的精度取决于“首字节落盘”与“首帧曝光”的差，实测 ffmpeg 启动到首字节
-1550 ± 10 ms，两路之间相差 9 ms。**不要用 Windows 的系统时间去换算**：WSL 与
-Windows 实测差约 1.61 秒，混用会整体偏 1.6 秒。
+`epoch` 的精度取决于"首字节落盘"与"首帧曝光"的差 —— 这是个可以直接测的量。
+[`latency/`](latency/) 下的程序用屏幕二维码对时，本机实测中位数约 **191 ms**
+（含显示链路），单轮 IQR 约 5 ms。改分辨率、帧率、codec 或换 USB 口都要重测。
+
+**不要拿另一个系统的时钟去换算。** WSL 与 Windows 的墙钟不一定对齐：本机 2026-11-16
+实测差 0.3 ms，但历史记录里出现过 1.61 s（NTP 没同步时就会这样）。稳妥做法是在同一个
+时钟域里取两个时刻相减，或者先量一次两边的差再换算。
 
 ## 7. 常见问题
 

@@ -51,6 +51,13 @@ except ImportError as exc:  # pragma: no cover - dependency guard
     )
     raise SystemExit(2)
 
+# 实时视图在 ../viewer 下。采集程序单独成目录后要把它加进搜索路径，
+# 否则 --view 时函数内的 `from live_view import ...` 会 ImportError
+# （延迟导入，--help 测不出来）。
+_VIEWER_DIR = Path(__file__).resolve().parent.parent / "viewer"
+if str(_VIEWER_DIR) not in sys.path:
+    sys.path.insert(0, str(_VIEWER_DIR))
+
 from camera_ffmpeg import (
     FfmpegCamera,
     discover_video_nodes,
@@ -75,8 +82,11 @@ from quest3 import (
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-DEFAULT_OUTPUT_ROOT = SCRIPT_DIR / "recordings"
-DEFAULT_CONFIG_PATH = SCRIPT_DIR / "cap_config.json"
+# 采集程序在 capture/ 下，配置与输出放在上一层（Cap_Quest 根）：
+# 配置被采集、延时测量、手套标定三处共用，放根目录避免各自维护一份。
+QUEST_ROOT = SCRIPT_DIR.parent
+DEFAULT_OUTPUT_ROOT = QUEST_ROOT / "recordings"
+DEFAULT_CONFIG_PATH = QUEST_ROOT / "cap_config.json"
 # PXCap III has no motor/encoder bottleneck, so the default matches the product
 # data rate instead of PXDex's 30 Hz (PXDex is limited by its 78 Hz encoder).
 DEFAULT_HAND_RATE_HZ = 120

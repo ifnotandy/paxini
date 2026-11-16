@@ -40,7 +40,8 @@ from typing import Any, Sequence
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-PROJECT_ROOT = SCRIPT_DIR.parent
+# capture/ → Cap_Quest → Paxini-Cap，sdk 在 Paxini-Cap 下
+PROJECT_ROOT = SCRIPT_DIR.parent.parent
 DEFAULT_APK = (
     PROJECT_ROOT
     / "sdk"

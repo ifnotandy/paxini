@@ -10,19 +10,19 @@
 #             export PATH="$HOME/bin:$PATH"
 #             sudo timedatectl set-ntp false
 #             usbipd detach --busid 3-3 && usbipd attach --wsl --busid 3-3
-#             python3.10 collect_cap.py --no-quest --cap-side right
+#             python3.10 capture/collect_cap.py --no-quest --cap-side right
 #             采完读 manifest.json 打印摘要并检查 verify.row_mismatch
 #
 #            usbipd 那步只在 /dev/ttyACM0 不存在时才做（WSL 空闲约 60 秒会关掉，
 #            attach 随之失效）；busid 自动从 usbipd list 里按 28e9:018a 查，
 #            也可以用 USBIPD_BUSID=3-3 覆盖。
 #
-# 【用法】
-#   bash run_capture_noquest.sh                  一直采，Ctrl+C 停（只按一次）
-#   bash run_capture_noquest.sh -d 60            采 60 秒
-#   bash run_capture_noquest.sh -d 60 --view     边采边看（要 WSLg 或物理显示器）
-#   bash run_capture_noquest.sh -d 10 --dry-run  只打印将要执行的命令，不启动
-#   bash run_capture_noquest.sh -- --video-codec h264     透传未列出的参数
+# 【用法】（下面几条都在 Cap_Quest/ 根目录执行，脚本自己会 cd 到 capture/）
+#   bash scripts/run_capture_noquest.sh                  一直采，Ctrl+C 停（只按一次）
+#   bash scripts/run_capture_noquest.sh -d 60            采 60 秒
+#   bash scripts/run_capture_noquest.sh -d 60 --view     边采边看（要 WSLg 或物理显示器）
+#   bash scripts/run_capture_noquest.sh -d 10 --dry-run  只打印将要执行的命令，不启动
+#   bash scripts/run_capture_noquest.sh -- --video-codec h264     透传未列出的参数
 #
 # 【退出码】0 正常；2 环境检查不过（没串口/没 ffmpeg/没 SDK）；
 #          3 采集跑完了但 manifest 的行数校验没通过
@@ -30,7 +30,9 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-cd "$SCRIPT_DIR" || { echo "[X] 无法进入脚本目录"; exit 2; }
+# 本脚本在 scripts/ 下，采集程序在 capture/、配置与输出在上一层
+QUEST_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
+cd "$QUEST_ROOT/capture" || { echo "[X] 无法进入采集目录"; exit 2; }
 
 PY="${PYTHON:-python3.10}"
 DURATION=""
@@ -91,9 +93,9 @@ printf '  ffmpeg  %s\n  ffprobe %s\n' "$FFMPEG_BIN" "$FFPROBE_BIN"
 
 # 相机后端预检。wsl 后端要一份 Windows 版 ffmpeg.exe（不入库）；linux 后端要
 # /dev/video* 节点。这台机器的配置是 wsl，换机器/换目录时最容易在这里踩空。
-BACKEND="$("$PY" -c 'import json,os;print((json.load(open("cap_config.json")).get("camera_backend") or "linux") if os.path.isfile("cap_config.json") else "linux")' 2>/dev/null || echo linux)"
+BACKEND="$("$PY" -c 'import json,os,sys; p=sys.argv[1]; print((json.load(open(p)).get("camera_backend") or "linux") if os.path.isfile(p) else "linux")' "$QUEST_ROOT/cap_config.json" 2>/dev/null || echo linux)"
 if [ "$BACKEND" = "wsl" ]; then
-  WIN_FFMPEG="${FFMPEG_WIN:-$(cd "$SCRIPT_DIR/.." && pwd)/sdk/ffmpeg-win/ffmpeg.exe}"
+  WIN_FFMPEG="${FFMPEG_WIN:-$(cd "$QUEST_ROOT/.." && pwd)/sdk/ffmpeg-win/ffmpeg.exe}"
   if [ -f "$WIN_FFMPEG" ]; then
     printf '  相机后端 wsl，ffmpeg.exe %s\n' "$WIN_FFMPEG"
   else
@@ -206,7 +208,7 @@ step 6/6 "结果摘要"
 if [ -n "$OUT_DIR" ]; then
   TARGET="$OUT_DIR"
 else
-  TARGET="$(ls -dt recordings/data_* 2>/dev/null | head -1)"
+  TARGET="$(ls -dt "$QUEST_ROOT"/recordings/data_* 2>/dev/null | head -1)"
 fi
 
 if [ -z "${TARGET:-}" ] || [ ! -f "$TARGET/manifest.json" ]; then

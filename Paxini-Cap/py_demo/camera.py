@@ -10,7 +10,8 @@ from datetime import datetime
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-sys.path.insert(0, str(SCRIPT_DIR.parent / 'Cap_Quest'))
+# 复用采集程序的 camera_ffmpeg（2026-11-16 起它在 Cap_Quest/capture/ 下）
+sys.path.insert(0, str(SCRIPT_DIR.parent / 'Cap_Quest' / 'capture'))
 
 from camera_ffmpeg import (  # noqa: E402
     FfmpegCamera,

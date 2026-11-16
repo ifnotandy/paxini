@@ -52,6 +52,12 @@ except ImportError as exc:  # pragma: no cover - dependency guard
     )
     raise SystemExit(2)
 
+# 采集程序在 ../capture 下。可视化单独成目录后必须显式加进 sys.path，
+# 否则 from collect_cap import 会失败。
+_CAPTURE_DIR = Path(__file__).resolve().parent.parent / "capture"
+if str(_CAPTURE_DIR) not in sys.path:
+    sys.path.insert(0, str(_CAPTURE_DIR))
+
 # Reuse the recorder's constants so the viewer cannot drift from the file
 # layout.  ``collect_cap`` only imports the SDK lazily, so this is safe on a
 # machine without the glove plugged in.

@@ -1,0 +1,114 @@
+# 任务手册
+
+按"我要干成什么"组织，直接照做。命令都在 `Paxini-Cap/Cap_Quest/` 下执行。
+
+## 1. 跑一次采集（从零）
+
+```bash
+# 0) 环境（只做一次，已装可跳）
+sudo dpkg -i ../sdk/pxhandsdk_1.0.0.0.ubantu2204_amd64.deb
+python3.10 -m pip install --user -r ../requirements.txt
+
+# 1) 确认设备在
+export PATH="$HOME/bin:$PATH"
+python3.10 capture/collect_cap.py --list-devices    # 串口末尾应是 PXCap
+
+# 2) 不接硬件先自检
+python3.10 selftest/selftest.py                     # 102 项
+
+# 3) 关 NTP（必须）
+sudo timedatectl set-ntp false
+
+# 4) 采
+python3.10 capture/collect_cap.py --cap-side right --no-quest
+```
+
+**成功判据**：结束时会打印 `verify.row_mismatch` 为空。非空说明某组数据集首维与
+自己的行数不一致，这个文件能打开但按行取数会整体错位。
+
+产物在 `recordings/data_<YYYYMMDD>_<n>/`。
+
+## 2. 采集起不来，按现象查
+
+| 现象 | 先查这个 |
+|---|---|
+| `SERIAL_BUSY(102)` | 串口被占：关掉 PXCap Studio、`hand_calib.py`、旧进程 |
+| 找不到串口 | `ls /dev/ttyACM*`；空就重跑 `usbipd attach`；再不行查 `dialout` 组 |
+| `import pxhandsdk` 成功但没 `PxCap3` | 用成 3.12 了，换 `python3.10` |
+| 相机 0 fps / 5 fps | `camera_backend` 是不是被改回 `linux` 了 |
+| 相机 20 秒不出图 | 先 `--camera-mode cam0` 排除带宽；再验分辨率是否被支持 |
+| 等 Quest 超时 120 s | 没有头显就加 `--no-quest` |
+| 采完没有 `manifest.json` | 被强杀了。`data.h5` 尾部最多丢 100 行，重采 |
+
+## 3. 改 HDF5 字段
+
+三步，一步不能少：
+
+1. 改 `capture/collect_cap.py` 的 `CAP_DATASETS`（手套侧）或 `_quest_layout()`
+   （Quest 侧），同时把 `format_version` 从 4 加一
+2. 改 `DOC/HDF5结构说明.md` 的字段表 + 版本变更表（**定点修改，不要整份重写**）
+3. 在 `selftest/selftest.py` 加一条用例，跑通 102→103 项
+
+漏第 3 步的后果：下次别人改坏这个字段，没人发现。
+
+## 4. 加一个命令行参数
+
+1. `capture/collect_cap.py` 的 `build_parser()` 加 `add_argument`
+2. `cap_config.json` 加同名字段 + 在 `_可选项说明` 里写一行
+3. `load_config_file()` / `apply_config()` 确认这个键会被读取（命令行优先于文件）
+4. `Cap_Quest/README.md` §6.2 参数表加一行
+5. `selftest` 的"配置"组加用例
+
+验证：`python3.10 capture/collect_cap.py --help` 能看到，且
+`python3.10 -c "import json;print(json.load(open('cap_config.json')))"` 不报错。
+
+## 5. 测相机延迟
+
+**必须在 Windows 侧跑**，让二维码时刻和 `epoch` 同在一个时钟域：
+
+```powershell
+cd C:\Users\Andy\Desktop\paxini\Paxini-Cap\Cap_Quest
+& "C:\Users\Andy\AppData\Local\Programs\Python\Python312\python.exe" `
+  latency\measure_camera_latency_win.py --camera 0 --seconds 15 --repeat 3
+```
+
+把弹出的二维码窗口对准相机，占画面 1/4 以上。
+
+**成功判据**：解码率 > 30%、样本 ≥ 100、IQR < 20 ms。三个都满足才填进下游修正。
+
+结果怎么用：`timestamp_corrected = timestamp_unix_ns - 中位数(ms) * 1e6`，
+`timestamp_monotonic_ns` 同样减。
+
+## 6. 看采到的数据
+
+```bash
+python3.10 viewer/visualize.py recordings/data_20261113_9            # Tk 窗口
+python3.10 viewer/visualize.py recordings/data_20261113_9 --html     # 导出浏览器版
+python3.10 viewer/visualize.py recordings/data_20261113_9 --save-png a.png
+```
+
+没有 `python3.10-tk` 时用 `--html`。浏览器版支持悬停读数、保峰抽稀、双路视频面板。
+
+## 7. 提交前
+
+```bash
+cd Paxini-Cap/Cap_Quest
+python3.10 -m py_compile capture/*.py viewer/*.py selftest/*.py latency/*.py calib/*.py
+python3.10 -m pyflakes  capture/*.py viewer/*.py selftest/*.py latency/*.py calib/*.py
+python3.10 selftest/selftest.py                      # 102 项（加过用例就是 103+）
+```
+
+三关都过再提交。改过行为或数据结构，`selftest` 必须加用例，不能只靠手跑过一遍。
+
+## 8. 判断一个改动安不安全
+
+按顺序问自己：
+
+1. **它会不会让 `cap/` `quest/` `cameras/` 的某一维变长或变短？** → 会，就要升
+   `format_version` 并改文档
+2. **它是不是在采集端做了配对或插值？** → 是，违反约束 1，停下
+3. **它有没有引入一个新的时钟读数？** → 有，确认和原有列同源，否则违反约束 2
+4. **它会不会让回调线程做 IO？** → 会，挪到主线程
+5. **它改的是不是 `DOC/HDF5结构说明.md`？** → 整份重写会覆盖用户手动编辑的内容
+
+五条都过了，再动手。

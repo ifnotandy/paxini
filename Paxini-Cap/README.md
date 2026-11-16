@@ -6,16 +6,15 @@ PXCap III 数据手套 + 双路相机 + Quest 3 的同步采集工程，对应
 
 ```text
 Paxini-Cap/
-├── Cap_Quest/          # 主程序（对应 Dex_Quest）
-│   ├── collect_cap.py      # 主程序：参数、就绪等待、HDF5、manifest（不做对齐）
-│   ├── camera_ffmpeg.py    # ffmpeg 直采 V4L2 + ffprobe 回填时间戳
-│   ├── quest3.py           # Quest 3 ADB/SDK 封装；样本与四个 SDK 时间戳在这里采
-│   ├── selftest.py         # 不接硬件的自检，102 项
-│   ├── visualize.py        # 回放采集结果：Tk 窗口，或 --html 导出浏览器版
-│   ├── live_view.py        # 采集时的实时窗口（独立子进程，不占采集主循环）
-│   ├── hand_calib.py       # 手套零点标定：SDK 标零/静态磁检测 + 闸门 + 复读验证
-│   ├── cap_config.json     # 可选配置（存在即加载，命令行优先）
-│   └── README.md           # 怎么用：参数表、输出、回放、实时视图、FAQ、验证状态
+├── Cap_Quest/          # 主程序（对应 Dex_Quest）；内部结构与命令见其 README
+│   ├── capture/            # 采集主程序与设备驱动层
+│   ├── calib/              # 手套零点标定
+│   ├── latency/            # 相机延迟测量
+│   ├── viewer/             # 回放与实时视图
+│   ├── selftest/           # 不接硬件的自检，102 项
+│   ├── scripts/            # 一键采集脚本
+│   ├── recordings/         # 采集输出（data_<日期>_<序号>/）
+│   └── cap_config.json     # 可选配置（存在即加载，命令行优先）
 ├── DOC/                # 文档（格式说明、时钟说明、待验证清单、标定）
 │   ├── README.md           # 文档索引 + 阅读顺序 + 维护约定
 │   ├── HDF5结构说明.md     # 逐字段说明 + 完整目录树（data.h5 的唯一权威文档）
@@ -44,8 +43,9 @@ Paxini-Cap/
 
 ### 0.1 不能违反的约定
 
-1. **采集端不做对齐。** 三条行轴各写各的，配对属于下游。曾经有过一版对齐代码，
-   已整体删除，别加回来。
+1. **采集端不做对齐。** 三条行轴 `cap/`(N) / `quest/`(Q) / `cameras/*`(M) 互相独立、
+   行数永不相等，谁都不能当索引去切另一条。配对属于下游 `Paxini-Align/`。曾经有过
+   一版对齐代码，已整体删除，别加回来。
 2. **只记 SDK 给的时间戳。** `cap/` 的 unix + monotonic 由 pxhandsdk 帧结构自带；
    `quest/` 的四个由 `quest3.collect_sample` 取。不要补主机侧读数。
 3. **分布力的 119 是坑位数，不是点数。** 每槽位按 `distribute_counts` 读，
@@ -57,9 +57,9 @@ Paxini-Cap/
 6. **`DOC/HDF5结构说明.md` 被用户手动编辑过**，只能定点修改，禁止整份重写。
 7. **改 `cap/` 或 `quest/` 的布局必须升 `format_version`**（当前 `4`），并在
    `HDF5结构说明.md` 的版本变更表里写清改了什么。下游按版本号判断怎么读。
-8. **WSL 里相机必须用 `camera_backend: wsl`。** usbipd 转发 UVC 会丢等时包，
-   720p 从 30 fps 掉到 5 fps（驱动日志刷 `Dropping payload (out of sync)`）。
-   这不是参数问题，调分辨率、关厂商软件、改曝光都无效。
+8. **WSL 里相机必须用 `camera_backend: wsl`。** usbipd 转发 UVC 会丢等时包，720p
+   从 30 fps 掉到 5 fps，且与曝光、分辨率、厂商软件都无关。两条后端的技术对比见
+   [`Cap_Quest/README.md` §6.3](Cap_Quest/README.md)。
 
 ### 0.2 代码地图
 
@@ -93,9 +93,9 @@ Paxini-Cap/
 
 ```bash
 cd Cap_Quest
-python3.10 -m py_compile *.py
-python3.10 -m pyflakes *.py
-python3.10 selftest.py          # 应为 102 项全过
+python3.10 -m py_compile capture/*.py viewer/*.py selftest/*.py latency/*.py calib/*.py
+python3.10 -m pyflakes capture/*.py viewer/*.py selftest/*.py latency/*.py calib/*.py
+python3.10 selftest/selftest.py          # 应为 102 项全过
 ```
 
 - 改数据结构或行为，**必须加 selftest 用例**，不能只靠手跑
@@ -135,96 +135,41 @@ usbipd attach --wsl --busid <BUSID>                   # 相机 2
 - 两路 UVC 同时走 usbipd 是同步传输，720p30 两路约 20 MB/s，是整条链路最容易
   出问题的地方：先用 `--camera-fps 15` 或 640x480 验证。
 
-## 3. 快速开始
+## 3. 安装（只做一次）
 
 ```bash
-# 1) 装 SDK（只做一次）
 sudo dpkg -i sdk/pxhandsdk_1.0.0.0.ubantu2204_amd64.deb
 sudo /usr/share/pxhandsdk/scripts/setup-serial-access.sh
 # 重新登录让 dialout 生效
 
-# 2) 装 Python 依赖（只做一次）
 python3.10 -m pip install --user -r requirements.txt
-
-# 3) 自检（不接硬件）
-cd Cap_Quest && python3.10 selftest.py
-
-# 4) 看设备
-export PATH="$HOME/bin:$PATH"
-python3.10 collect_cap.py --list-devices
-
-# 5) 采集（没有 Quest 头显时加 --no-quest）
-#    采前务必关 NTP：实测 20 秒内墙钟跳了 2201 ms，关掉后为 0
-sudo timedatectl set-ntp false
-export PATH="$HOME/bin:$PATH"
-python3.10 collect_cap.py --cap-side right --pose-side right
-
-# 5b) 采集时实时看（窗口在独立进程，关掉不影响录制）
-python3.10 collect_cap.py --cap-side right --pose-side right --view
-
-# 5c) 没有头显时用一键脚本（固定 --no-quest，采完自动核对 manifest）
-bash run_capture_noquest.sh -d 60          # 见 Cap_Quest/README.md「一键脚本（无 Quest 版）」
-
-# 6) 回放（没显示器就加 --html 导出浏览器版）
-python3.10 visualize.py recordings/data_<日期>_<序号>
 ```
 
-两种可视化分工：`--view` 是采集时的实时滚动窗口，只有最近几秒；`visualize.py` 是
-采完之后对整段数据的回放，可以拖时间轴、导 HTML。
+装完先跑 §0.4 的三关：`selftest` 102 项全过说明环境没问题，此时不需要插硬件。
 
-采集中途不要校时，命令见上面第 5 步；跳变的原因与发现方法见
-[`DOC/时间戳说明.md`](DOC/时间戳说明.md)。
+**验证设备与日常运行不在本文档**：`--list-devices`、采集、`--view`、一键脚本、回放、
+参数表全在 [`Cap_Quest/README.md` §1](Cap_Quest/README.md)。采前关 NTP、
+`export PATH="$HOME/bin:$PATH"`、没有头显加 `--no-quest` 这三条纪律，在该文件的
+【快速开始】与【§2 时间戳】里各有完整说明，这里不再重列。
 
-数据落在 `Cap_Quest/recordings/data_<YYYYMMDD>_<n>/`，详见
-[`Cap_Quest/README.md`](Cap_Quest/README.md)。
+## 4. 验证状态
 
-## 4. 数据与时间戳
+**结论：采集链路可用，跨源分析不可用。**
 
-**采集工程只存原始数据，不做对齐。** 三条独立行轴，各带自己的时间戳：
+真机（手套 + 双路相机）2026-11-13 已跑通，逐帧无丢帧、关 NTP 后时钟零跳变；不接
+硬件时 `selftest` 102 项全过。但三处缺口没补上之前，任何跨源结论都不成立：
 
-- 手套：`cap/`（N 行），每帧有墙钟 + 单调钟两个读数
-- Quest：`quest/`（Q 行），每次轮询一行，只存 SDK 给的四个时间戳 + `sequence`
-- 相机：`cameras/<id>/timestamp_unix_ns`（M 行），ffmpeg 打的墙钟
+| 缺口 | 状态 | 后果 |
+|---|---|---|
+| Quest 整组 | 无头显，C3~C8 未测 | `sdk_timestamp_ns` 属于哪个时钟未定，跨源对齐缺前置 |
+| 相机标定 | **功能不存在**（无代码、无数据） | 没有内参/外参，"距离 / 位置 / 三维"全无依据 |
+| 手套零点标定 | 代码已有，无真机记录 | 关节角零点可能是偏的，默认阈值待 `info` 噪声底复核 |
 
-配对（谁和谁、什么阈值、要不要插值）属于下游处理工程，采集端不写也不猜。
-细节见 `DOC/HDF5结构说明.md`，时钟域与换算见 `DOC/时间戳说明.md`。
+逐项实测值、判据、以及 7 条"决定不做"的理由（E 组）全在
+[`DOC/待验证清单.md`](DOC/待验证清单.md)。使用侧的明细表见
+[`Cap_Quest/README.md` §10](Cap_Quest/README.md)。
 
-## 5. 已知限制
-
-完整清单见 [`Cap_Quest/README.md`](Cap_Quest/README.md) §8，要点：只支持一只手套；
-强杀进程可能丢 `manifest.json` 和未 flush 的尾部行（≤100 行）；Matroska 时间基 1 ms、
-量化误差 ±0.5 ms；**时间对齐不等于坐标对**——相机标定功能还不存在，四组量的设计见
-[`DOC/标定.md`](DOC/标定.md) §2。
-
-## 6. 验证状态
-
-**真机（手套 + 双路相机，2026-11-13）已跑通**：连采 5 次（25~75 s），手套
-115.4~118.3 Hz、两路相机恒 30.0 fps、37 个数据集行数零不一致；相机逐帧 pts 无空洞
-（`copy` 与 `h264` 双档，后者约 2.2 逻辑核、体积减半），关 NTP 后时钟零跳变，
-`verify.row_mismatch` 全部为空。回放（浏览器版 + 实时窗口，"纯数字"口径）与双路视频
-面板逐项通过，交互层在 Chromium 里按真实事件实测过；**Tk 回放的交互没人在真窗口里
-点过**，且还没有一次真正有接触、有动作、带 Quest 的完整场景。
-
-**不接硬件也过**：`selftest.py` 102 项、`py_compile` / `pyflakes`、`--list-devices`、
-无设备退出码 2 且不留目录、假 SDK 驱动真实主循环、ffmpeg 合成源全链路、实时视图
-子进程推送 130 µs/帧。
-
-**还没有的**：
-
-- **Quest 整组**（无头显）：C3~C8 未测，其中 C8（`sdk_timestamp_ns` 属于哪个时钟）是
-  跨源对齐的前置条件。前置已备齐：PC Service 能起（监听 63901/60061），APK 已入库
-  并校验。
-- **相机标定**：功能不存在——无代码、无数据、`meta/` 里没有标定出处，四组量的设计见
-  [`DOC/标定.md`](DOC/标定.md) §2。在此之前任何"距离 / 位置 / 三维"的结论都没有依据。
-  **手套零点标定已实现**（`Cap_Quest/hand_calib.py`，见 [`DOC/标定.md`](DOC/标定.md) §1），
-  但还没有真机执行记录（清单 B9）。
-
-**逐项状态、实测值与判据全在 [`DOC/待验证清单.md`](DOC/待验证清单.md)**：
-A 相机 / B 手套 / C Quest / D 时间 / E 不做 / F 可视化 / G 标定；G 组不是"待验证"
-而是"待实现"（设计见 [`DOC/标定.md`](DOC/标定.md) §2），E 组记录了 7 条
-"决定不做/已删除"的理由，避免重复讨论。
-
-## 7. 后续
+## 5. 后续
 
 1. **标定**（优先级最高，因为它是"空间"这件事的前提）：相机内参、双相机外参、
    手套→相机、Quest→相机，四组量的判据与落盘格式写在 [`DOC/标定.md`](DOC/标定.md) §2。

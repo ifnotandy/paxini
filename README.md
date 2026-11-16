@@ -1,19 +1,40 @@
 # Paxini
 
-PXCap III 数据手套与 PXDex III 灵巧手的开发工作区。采集上位机、执行器 SDK 示例、厂商资料集中在一个仓库里管理。
+PXCap III 数据手套与 PXDex III 灵巧手的开发工作区。两条线，代码骨架同源，用途完全不同：
 
-## 目录
+- **`Paxini-Cap/`** —— 只记录、不运动。手套 + 双路相机 + Quest 3 同步采集，输出单个 HDF5。
+- **`Paxini-Dex/`** —— 会运动。PXDex III 灵巧手、导纳控制、`Dex_Quest` 遥操作采集。
+
+`Cap_Quest` 对应 `Dex_Quest`，差别是 Cap 没有电机、不产生任何动作。两条线的
+`quest3.py` 已经分叉，不要再追求两份一致。
+
+## 仓库结构
 
 | 路径 | 内容 |
 |---|---|
-| `Paxini-Cap/` | Cap 采集上位机：手套 + 双路相机 + Quest 3 同步采集，输出单个 HDF5。详见 [`Paxini-Cap/README.md`](Paxini-Cap/README.md) |
-| `Paxini-Dex/` | Dex 执行器：SDK 封装、`Dex_Quest` 采集流程、`Dex_Admittance` 导纳控制 |
-| `厂商资料/` | 厂商 PDF 说明书、SDK 使用手册、PXCap / PXDex 的 URDF 与 STL |
+| `Paxini-Cap/` | Cap 采集上位机 → [工程说明](Paxini-Cap/README.md) |
+| `Paxini-Dex/` | Dex 执行器（SDK 封装、`Dex_Quest`、`Dex_Admittance`）→ [说明](Paxini-Dex/README.md) |
+| `agent/` | 给 AI 助手的项目认知文档 → [入口](agent/README.md) |
+| `厂商资料/` | 厂商 PDF 说明书、SDK 手册、PXCap / PXDex 的 URDF 与 STL |
 | `厂商数据采集/` | 厂商上位机产出的原始录制数据（**不入库**，仅本地保留） |
 | `Quest3_功能与接口清单.xlsx` | Quest 3 功能与接口梳理 |
 | `帕西尼PXHandSDK功能清单_amd64_1.0.0.0.xlsx` | PXHand SDK 接口清单 |
 | `厂商上位机判分标准.txt` | 上位机能力对照标准 |
 | `启动PXCap.bat` / `PXCap Studio.lnk` | 本地启动入口 |
+
+## 文档怎么读
+
+四层，各答一个问题，不要重复读同一件事：
+
+| 层级 | 文件 | 回答什么 |
+|---|---|---|
+| 项目 | 本文件 | 有哪些子项目、东西在哪、二进制从哪来 |
+| 工程 | [`Paxini-Cap/README.md`](Paxini-Cap/README.md) | 怎么开发：架构、不能违反的约定、环境坑、改完怎么验证 |
+| 使用 | [`Paxini-Cap/Cap_Quest/README.md`](Paxini-Cap/Cap_Quest/README.md) | 怎么用：命令、参数表、输出格式、FAQ、已知限制 |
+| 细节 | [`Paxini-Cap/DOC/`](Paxini-Cap/DOC/README.md) | HDF5 逐字段、时钟域换算、待验证清单、标定设计 |
+
+[`agent/`](agent/README.md) 是给 AI 助手的另一套：任务到文件的映射、硬约束及其理由、
+任务手册、踩坑记录。人也可以看，但它是为「快速动手」而不是「系统学习」写的。
 
 ## 安装包与二进制
 
@@ -31,9 +52,11 @@ PXCap III 数据手套与 PXDex III 灵巧手的开发工作区。采集上位�
 
 ## 环境
 
-- Python 3.10+，依赖见 `Paxini-Cap/requirements.txt`
-- Ubuntu 22.04（相机 V4L2 直采、SDK 运行环境）或 Windows + WSL2
-- Quest 3 需 `adb` 连接，设备 IP 记录在 `Cap_Quest/.quest_ip`（不入库）
+Python 3.10 + Ubuntu 22.04/24.04，或 Windows + WSL2。手套 SDK 只能用 `python3.10`，
+系统自带的 3.12 加载不出 `PxCap3`。
+
+版本要求、`dpkg` 安装顺序、`usbipd` 转发规则、ffmpeg 从哪来 —— 全在
+[`Paxini-Cap/README.md` §1–§2](Paxini-Cap/README.md)。
 
 ## 版本库说明
 

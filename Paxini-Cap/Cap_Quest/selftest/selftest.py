@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import math
 import shutil
+import sys
 import tempfile
 import types
 from pathlib import Path
@@ -30,6 +31,13 @@ from typing import Any
 
 import h5py
 import numpy as np
+
+# 自检单独成目录，被测模块分散在 ../capture 与 ../viewer，显式补上搜索路径。
+_QUEST_ROOT = Path(__file__).resolve().parent.parent
+for _sub in ("capture", "viewer"):
+    _module_dir = _QUEST_ROOT / _sub
+    if str(_module_dir) not in sys.path:
+        sys.path.insert(0, str(_module_dir))
 
 from camera_ffmpeg import parse_rate
 from collect_cap import (

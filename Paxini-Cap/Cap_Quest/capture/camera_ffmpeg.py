@@ -98,7 +98,8 @@ def find_windows_ffmpeg(argument: str | None = None) -> str:
     if from_env:
         candidates.append(Path(from_env).expanduser())
     module_dir = Path(__file__).resolve().parent
-    candidates.append(module_dir.parent / "sdk" / "ffmpeg-win" / "ffmpeg.exe")
+    # capture/ 的上一层是 Cap_Quest，再上一层才是 Paxini-Cap（sdk 在那里）
+    candidates.append(module_dir.parent.parent / "sdk" / "ffmpeg-win" / "ffmpeg.exe")
 
     for candidate in candidates:
         if candidate.is_file():
