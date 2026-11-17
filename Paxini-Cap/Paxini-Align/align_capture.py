@@ -1,0 +1,729 @@
+#!/usr/bin/env python3
+"""Resample the glove (cap) stream onto the camera frame timeline.
+
+The collector deliberately never aligns sources; this is the downstream step that
+does. Policy for this project (2026-11-17):
+
+- Glove timestamps are treated as ground truth for *when a state was available*.
+- Camera timestamps define the *sampling grid*: one output row per camera frame.
+- The glove stream (120 Hz) is resampled onto that 33 ms grid by linear
+  interpolation between the two bracketing glove frames.
+- Quest is ignored for now (``quest/`` rows are not touched or read).
+- Camera latency delta is measured once per machine (``Cap_Quest/latency``) and
+  subtracted from camera timestamps, because a camera timestamp is the moment the
+  frame reached the host, not the moment it was exposed.
+
+Nothing here mutates the source ``data.h5``. Output goes to ``<recording>/aligned/``.
+
+Usage::
+
+    python align_capture.py <recording_dir or recordings_root> [options]
+
+See README.md for the output schema and the quality gates.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from contextlib import closing
+from pathlib import Path
+from typing import Any, Sequence
+
+import numpy as np
+
+try:  # h5py is only needed for real files; --selftest avoids it
+    import h5py
+except ImportError:  # pragma: no cover - environment guard
+    h5py = None  # type: ignore[assignment]
+
+
+ALIGNED_FORMAT_VERSION = 1
+DEFAULT_DELAY_MS = 192.3
+#: Float channels: linear interpolation between bracketing glove frames.
+LINEAR_STATE = ("joint_angles_deg", "resultant_force")
+#: Integer channels: nearest frame, because a counter is not a signal.
+NEAREST_STATE = ("encoder_raw", "distribute_counts")
+#: Optional heavy channel (7.1 KB/row); interpolated unless --omit-distribution.
+DISTRIBUTION_STATE = "distribute_force"
+
+#: A gap wider than this multiple of the median interval is reported as a hole.
+HOLE_FACTOR = 1.5
+
+
+# ---------------------------------------------------------------------------
+# logging
+# ---------------------------------------------------------------------------
+
+
+def log(message: str) -> None:
+    print(message, flush=True)
+
+
+def warn(message: str) -> None:
+    print(f"[WARN] {message}", flush=True)
+
+
+def error(message: str) -> None:
+    print(f"[ERROR] {message}", file=sys.stderr, flush=True)
+
+
+class AlignError(RuntimeError):
+    """Fatal problem with the input data or the requested alignment."""
+
+
+WRITE_FLAG_HINT = (
+    "文件带着“上次是写打开”的一致性标志（采集被强杀后 HDF5 没来得及清），"
+    "h5py 会拒绝只读打开。清它只改超级块 1 个字节并重算超级块校验和，数据内容不动："
+    "python align_capture.py <同一目录> --clear-write-flag"
+)
+
+_M32 = 0xFFFFFFFF
+
+
+def _rot(value: int, bits: int) -> int:
+    return ((value << bits) | (value >> (32 - bits))) & _M32
+
+
+def lookup3(data: bytes, initval: int = 0) -> int:
+    """Bob Jenkins' lookup3 (hashlittle), as used by HDF5 for superblock checksums."""
+    size = len(data)
+    a = b = c = (0xDEADBEEF + size + initval) & _M32
+    pos = 0
+    remaining = size
+    while remaining > 12:
+        w0, w1, w2 = (
+            int.from_bytes(data[pos : pos + 4], "little"),
+            int.from_bytes(data[pos + 4 : pos + 8], "little"),
+            int.from_bytes(data[pos + 8 : pos + 12], "little"),
+        )
+        a = (a + w0) & _M32
+        b = (b + w1) & _M32
+        c = (c + w2) & _M32
+        a = (a - c) & _M32; a ^= _rot(c, 4); c = (c + b) & _M32
+        b = (b - a) & _M32; b ^= _rot(a, 6); a = (a + c) & _M32
+        c = (c - b) & _M32; c ^= _rot(b, 8); b = (b + a) & _M32
+        a = (a - c) & _M32; a ^= _rot(c, 16); c = (c + b) & _M32
+        b = (b - a) & _M32; b ^= _rot(a, 19); a = (a + c) & _M32
+        c = (c - b) & _M32; c ^= _rot(b, 4); b = (b + a) & _M32
+        pos += 12
+        remaining -= 12
+    if remaining == 0:
+        return c
+    for i in range(remaining):
+        byte = data[pos + i]
+        if i < 4:
+            a = (a + (byte << (8 * i))) & _M32
+        elif i < 8:
+            b = (b + (byte << (8 * (i - 4)))) & _M32
+        else:
+            c = (c + (byte << (8 * (i - 8)))) & _M32
+    c ^= b; c = (c - _rot(b, 14)) & _M32
+    a ^= c; a = (a - _rot(c, 11)) & _M32
+    b ^= a; b = (b - _rot(a, 25)) & _M32
+    c ^= b; c = (c - _rot(b, 16)) & _M32
+    a ^= c; a = (a - _rot(c, 4)) & _M32
+    b ^= a; b = (b - _rot(a, 14)) & _M32
+    c ^= b; c = (c - _rot(b, 24)) & _M32
+    return c
+
+
+def clear_write_flag(path: Path) -> bool:
+    """Clear HDF5's "file was opened for write" consistency flag in place.
+
+    Equivalent to ``h5clear -s``: the status byte is zeroed *and* the superblock
+    checksum is recomputed — flipping the byte alone makes the file fail with
+    "incorrect metadata checksum", which looks like corruption but is not.
+    Returns True if it patched.
+    """
+    with open(path, "r+b") as handle:
+        head = bytearray(handle.read(48))
+        if head[:8] != b"\x89HDF\r\n\x1a\n":
+            return False
+        version = head[8]
+        if version in (0, 1):
+            flags_at, checksum_at, covered = 20, None, 0
+        elif version in (2, 3):
+            flags_at, checksum_at, covered = 11, 44, 44
+        else:
+            return False
+        if all(byte == 0 for byte in head[flags_at : flags_at + (4 if version in (0, 1) else 1)]):
+            return False
+        width = 4 if version in (0, 1) else 1
+        head[flags_at : flags_at + width] = b"\x00" * width
+        handle.seek(0)
+        if checksum_at is not None:
+            head[checksum_at : checksum_at + 4] = lookup3(bytes(head[:covered])).to_bytes(4, "little")
+        handle.write(bytes(head))
+        return True
+
+
+# ---------------------------------------------------------------------------
+# input discovery
+# ---------------------------------------------------------------------------
+
+
+def find_recordings(path: Path) -> list[Path]:
+    """Accept one recording dir, or a root whose children are recordings."""
+    if (path / "data.h5").is_file():
+        return [path]
+    if not path.is_dir():
+        raise AlignError(f"路径不存在：{path}")
+    found = sorted(p for p in path.iterdir() if (p / "data.h5").is_file())
+    if not found:
+        raise AlignError(f"{path} 下没有找到 data.h5（单个采集目录或 recordings 根目录都行）")
+    return found
+
+
+def camera_slots(handle: Any) -> list[str]:
+    if "cameras" not in handle:
+        return []
+    return sorted(handle["cameras"].keys())
+
+
+# ---------------------------------------------------------------------------
+# timebase
+# ---------------------------------------------------------------------------
+
+
+def has_mono(group: Any) -> bool:
+    return "timestamp_monotonic_ns" in group
+
+
+def choose_timebase(handle: Any, requested: str) -> str:
+    """Pick the clock used to pair sources.
+
+    Monotonic is preferred: glove and camera monotonic share one domain and are
+    immune to NTP steps (see DOC/时间戳说明.md). The linux camera backend has no
+    monotonic column, so fall back to wall clock there.
+    """
+    if requested in ("mono", "unix"):
+        return requested
+    slots = camera_slots(handle)
+    if has_mono(handle["cap"]) and slots and all(has_mono(handle["cameras"][s]) for s in slots):
+        return "mono"
+    return "unix"
+
+
+def detect_clock_jumps(unix_ns: np.ndarray, mono_ns: np.ndarray, threshold_ns: int = 5_000_000) -> int:
+    """Count NTP-like steps in the glove wall clock. Only meaningful for unix timebase."""
+    if unix_ns.size < 3:
+        return 0
+    offset = unix_ns.astype(np.int64) - mono_ns.astype(np.int64)
+    return int(np.count_nonzero(np.abs(np.diff(offset)) > threshold_ns))
+
+
+# ---------------------------------------------------------------------------
+# camera latency delta
+# ---------------------------------------------------------------------------
+
+
+def resolve_delay(explicit: float | None, disabled: bool) -> tuple[float, str]:
+    """Return (delta_ms, source). Ledger first, documented default second.
+
+    cam1 was never measured on this machine; project decision (2026-11-17) is to
+    reuse the cam0 value for every camera rather than leave cam1 uncorrected.
+    """
+    if disabled:
+        return 0.0, "disabled (--no-delay)"
+    if explicit is not None:
+        return float(explicit), "命令行 --delay-ms"
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "Cap_Quest" / "latency"))
+        from latency_records import load_records, pick_latest  # type: ignore
+
+        entry = pick_latest(load_records(), camera=0)
+        if entry:
+            return float(entry["median_ms"]), (
+                f"latency/records 台账 cam0 @{entry.get('at', '')}，两路共用同一值（cam1 未单独测）"
+            )
+        warn("台账里没有 cam0 的合格记录，退回内置默认值")
+    except Exception as exc:  # missing PyYAML, missing file, whatever
+        warn(f"读不到延迟台账（{exc.__class__.__name__}: {exc}），退回内置默认值")
+    return DEFAULT_DELAY_MS, f"内置默认值 {DEFAULT_DELAY_MS} ms（台账不可用）"
+
+
+# ---------------------------------------------------------------------------
+# resampling
+# ---------------------------------------------------------------------------
+
+
+def bracket_indices(src_ns: np.ndarray, dst_ns: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """For every dst time, return (left, right, w) with w the fraction in [0, 1].
+
+    dst times outside [src[0], src[-1]] are expected to be filtered by the caller;
+    the clamp here is a belt-and-braces guard so w never leaves [0, 1].
+    """
+    left = np.searchsorted(src_ns, dst_ns, side="right") - 1
+    left = np.clip(left, 0, max(src_ns.size - 2, 0))
+    right = left + 1
+    span = (src_ns[right] - src_ns[left]).astype(np.float64)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        w = np.where(span > 0, (dst_ns - src_ns[left]) / np.where(span > 0, span, 1.0), 0.0)
+    w = np.clip(w, 0.0, 1.0)
+    return left, right, w
+
+
+def gather(dataset: Any, indices: np.ndarray) -> np.ndarray:
+    """Read only the rows we need, preserving the requested order."""
+    uniq, inverse = np.unique(indices, return_inverse=True)
+    block = np.asarray(dataset[uniq])
+    return block[inverse]
+
+
+def lerp_rows(
+    dataset: Any,
+    left: np.ndarray,
+    right: np.ndarray,
+    w: np.ndarray,
+    dtype: np.dtype,
+    chunk: int = 512,
+) -> np.ndarray:
+    """Linear interpolation of a (N, ...) dataset, cast back to its own dtype.
+
+    Chunked along rows: distribution force is 3570 values per row, so a whole-file
+    float64 temporary would be hundreds of MB on a long recording. Work dtype is
+    float32 for wide rows (forces) and float64 for narrow ones (joint angles).
+    """
+    per_row = int(np.prod(dataset.shape[1:], dtype=np.int64)) if dataset.ndim > 1 else 1
+    work = np.float32 if per_row > 64 else np.float64
+    out = np.empty((left.size,) + dataset.shape[1:], dtype=dtype)
+    for start in range(0, left.size, chunk):
+        stop = min(start + chunk, left.size)
+        l_idx, r_idx, weight = left[start:stop], right[start:stop], w[start:stop].astype(work)
+        block = gather(dataset, np.concatenate([l_idx, r_idx]))
+        a = block[: l_idx.size].astype(work)
+        b = block[l_idx.size :].astype(work)
+        shape = (-1,) + (1,) * (a.ndim - 1)
+        tmp = a * (1.0 - weight.reshape(shape)) + b * weight.reshape(shape)
+        out[start:stop] = cast_to(tmp, dtype)
+    return out
+
+
+def nearest_rows(dataset: Any, left: np.ndarray, right: np.ndarray, w: np.ndarray) -> np.ndarray:
+    """Pick the closer of the two bracketing rows (no averaging of counters)."""
+    take_right = w >= 0.5
+    idx = np.where(take_right, right, left)
+    return gather(dataset, idx)
+
+
+def cast_to(values: np.ndarray, dtype: np.dtype) -> np.ndarray:
+    if np.issubdtype(dtype, np.integer):
+        info = np.iinfo(dtype)
+        return np.clip(np.rint(values), info.min, info.max).astype(dtype)
+    return values.astype(dtype)
+
+
+# ---------------------------------------------------------------------------
+# core alignment
+# ---------------------------------------------------------------------------
+
+
+def open_recording(recording: Path, clear_flag: bool = False) -> Any:
+    """Open data.h5 read-only, repairing the crashed-write consistency flag if asked."""
+    if h5py is None:
+        raise AlignError("缺少 h5py：请用装了 h5py 的 Python 运行（本机用 Python312 或 WSL 的 python3.10）")
+    path = recording / "data.h5"
+    try:
+        return h5py.File(path, "r")
+    except OSError as exc:
+        text = str(exc)
+        stale = "already open for write" in text or "consistency flags" in text
+        if not stale:
+            raise AlignError(f"打不开 {path.name}：{text}") from exc
+        if not clear_flag:
+            raise AlignError(WRITE_FLAG_HINT) from exc
+        if not clear_write_flag(path):
+            raise AlignError("一致性标志清除失败：超级块版本不认识，或标志本来就是 0") from exc
+        log(f"[INFO] 已清除 {path.parent.name} 的写标志（改超级块 1 字节 + 重算校验和）")
+        try:
+            return h5py.File(path, "r")
+        except Exception as exc2:  # h5py 对元数据坏掉抛的是 RuntimeError，不是 OSError
+            detail = str(exc2)
+            if "object header" in detail or "checksum" in detail:
+                raise AlignError(
+                    "超级块是完好的（标志已清、校验和对得上），但根组对象头读不出来 —— "
+                    "采集被强杀时 HDF5 的元数据缓存没落盘（file.flush() 只在 close() 里调），"
+                    "这份采集整份作废、只能重采。注意：不是只丢尾部 100 行"
+                ) from exc2
+            raise AlignError(f"清标志后仍打不开：{detail}") from exc2
+
+
+def align_recording(
+    recording: Path,
+    reference: str | None,
+    timebase: str,
+    delay_ms: float,
+    omit_distribution: bool,
+    interpolate_distribution: bool,
+    keep_outside: bool,
+    clear_flag: bool = False,
+) -> dict[str, Any]:
+    """Build the aligned arrays for one recording. Returns a result bundle."""
+    with closing(open_recording(recording, clear_flag)) as handle:
+        if "cap" not in handle:
+            raise AlignError("data.h5 里没有 cap/ 组，不是本工程的采集文件")
+        slots = camera_slots(handle)
+        if not slots:
+            raise AlignError("data.h5 里没有 cameras/ 组：这份采集没录视频，无法确定采样网格")
+
+        tb = choose_timebase(handle, timebase)
+        key = "timestamp_monotonic_ns" if tb == "mono" else "timestamp_unix_ns"
+
+        glove_t = np.asarray(handle["cap"][key][:], dtype=np.int64)
+        if glove_t.size < 2:
+            raise AlignError(f"手套帧数 {glove_t.size} 太少，无法插值")
+        if not np.all(np.diff(glove_t) > 0):
+            raise AlignError("手套时间戳非严格递增（墙钟被校时过？），先按 DOC/时间戳说明.md §4.1 处理")
+
+        jumps = 0
+        if tb == "unix" and has_mono(handle["cap"]):
+            jumps = detect_clock_jumps(
+                np.asarray(handle["cap"]["timestamp_unix_ns"][:], dtype=np.int64),
+                np.asarray(handle["cap"]["timestamp_monotonic_ns"][:], dtype=np.int64),
+            )
+
+        cam_times: dict[str, np.ndarray] = {}
+        for slot in slots:
+            group = handle["cameras"][slot]
+            if key not in group:
+                raise AlignError(f"cameras/{slot} 缺少 {key}（时间基不一致）")
+            series = np.asarray(group[key][:], dtype=np.int64)
+            if series.size == 0:
+                raise AlignError(f"cameras/{slot} 没有帧")
+            if not np.all(np.diff(series) > 0):
+                raise AlignError(f"cameras/{slot} 时间戳非严格递增")
+            cam_times[slot] = series
+
+        if reference is None:
+            reference = slots[0]
+        if reference not in cam_times:
+            raise AlignError(f"参考相机 {reference} 不在本文件里（有：{', '.join(slots)}）")
+
+        reference_t = cam_times[reference]
+        delay_ns = int(round(delay_ms * 1e6))
+        master_t = reference_t - delay_ns
+
+        inside = (master_t >= glove_t[0]) & (master_t <= glove_t[-1])
+        dropped = int(inside.size - np.count_nonzero(inside))
+        if not keep_outside:
+            master_t = master_t[inside]
+            ref_raw = reference_t[inside]
+            ref_index = np.flatnonzero(inside).astype(np.int32)
+        else:
+            ref_raw = reference_t
+            ref_index = np.arange(reference_t.size, dtype=np.int32)
+
+        if master_t.size == 0:
+            raise AlignError("相机帧全部落在手套覆盖范围外，无法对齐（两次采集没重叠）")
+
+        left, right, w = bracket_indices(glove_t, master_t)
+
+        state: dict[str, np.ndarray] = {}
+        cap = handle["cap"]
+        for name in LINEAR_STATE:
+            if name in cap:
+                state[name] = lerp_rows(cap[name], left, right, w, cap[name].dtype)
+        for name in NEAREST_STATE:
+            if name in cap:
+                state[name] = nearest_rows(cap[name], left, right, w)
+
+        distribution_note = "skipped"
+        if DISTRIBUTION_STATE in cap:
+            if omit_distribution:
+                distribution_note = "omitted (--omit-distribution)"
+            elif interpolate_distribution:
+                state[DISTRIBUTION_STATE] = lerp_rows(
+                    cap[DISTRIBUTION_STATE], left, right, w, cap[DISTRIBUTION_STATE].dtype
+                )
+                distribution_note = "interpolated"
+            else:
+                state[DISTRIBUTION_STATE] = nearest_rows(cap[DISTRIBUTION_STATE], left, right, w)
+                distribution_note = "nearest (--nearest-distribution)"
+
+        meta_attrs = {}
+        for attr in ("format_version", "started_at", "ended_at", "hand", "cameras", "verify"):
+            if attr in handle["meta"].attrs:
+                raw = handle["meta"].attrs[attr]
+                try:
+                    meta_attrs[attr] = json.loads(raw) if isinstance(raw, (str, bytes)) else raw
+                except (json.JSONDecodeError, TypeError):
+                    meta_attrs[attr] = str(raw)
+
+        # Per-camera nearest frame for every master row: multi-view training needs
+        # the other images' frame indices on the same row.
+        views: dict[str, dict[str, np.ndarray]] = {}
+        for slot in slots:
+            series = cam_times[slot]
+            if slot == reference and not keep_outside:
+                views[slot] = {
+                    "frame_index": ref_index,
+                    "dt_ms": np.zeros(master_t.size, dtype=np.float32),
+                    "timestamp_ns": ref_raw,
+                }
+                continue
+            pos = np.searchsorted(series, master_t)
+            lo = np.clip(pos - 1, 0, series.size - 1)
+            hi = np.clip(pos, 0, series.size - 1)
+            pick_hi = np.abs(series[hi] - master_t) < np.abs(master_t - series[lo])
+            idx = np.where(pick_hi, hi, lo)
+            views[slot] = {
+                "frame_index": idx.astype(np.int32),
+                "dt_ms": ((series[idx] - master_t) / 1e6).astype(np.float32),
+                "timestamp_ns": series[idx],
+            }
+
+    span_ns = glove_t[right] - glove_t[left]
+    offset_ns = master_t - glove_t[left]
+    holes = int(np.count_nonzero(np.diff(master_t) > HOLE_FACTOR * np.median(np.diff(master_t))))
+
+    result = {
+        "recording": recording,
+        "reference": reference,
+        "timebase": tb,
+        "camera_slots": slots,
+        "delay_ms": delay_ms,
+        "glove_rows": int(glove_t.size),
+        "camera_rows": int(reference_t.size),
+        "aligned_rows": int(master_t.size),
+        "dropped_outside": dropped,
+        "clock_jumps": jumps,
+        "holes": holes,
+        "state": state,
+        "views": views,
+        "timestamp_ns": master_t,
+        "timestamp_cam_raw_ns": ref_raw,
+        "glove_left": left.astype(np.int32),
+        "glove_right": right.astype(np.int32),
+        "weights": w,
+        "glove_span_ms": span_ns.astype(np.float64) / 1e6,
+        "glove_offset_ms": offset_ns.astype(np.float64) / 1e6,
+        "distribution": distribution_note,
+        "meta": meta_attrs,
+    }
+    return result
+
+
+# ---------------------------------------------------------------------------
+# output
+# ---------------------------------------------------------------------------
+
+
+def write_aligned(result: dict[str, Any], output_dir: Path) -> Path:
+    if h5py is None:
+        raise AlignError("缺少 h5py")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    path = output_dir / f"aligned_{result['reference']}.h5"
+
+    with h5py.File(path, "w") as out:
+        out.create_dataset("timestamp_ns", data=result["timestamp_ns"], dtype=np.int64)
+        out.create_dataset("timestamp_cam_raw_ns", data=result["timestamp_cam_raw_ns"], dtype=np.int64)
+        out.create_dataset("frame_index", data=result["views"][result["reference"]]["frame_index"], dtype=np.int32)
+
+        glove = out.create_group("glove")
+        glove.create_dataset("left_index", data=result["glove_left"], dtype=np.int32)
+        glove.create_dataset("right_index", data=result["glove_right"], dtype=np.int32)
+        glove.create_dataset("span_ms", data=result["glove_span_ms"], dtype=np.float64)
+        glove.create_dataset("offset_ms", data=result["glove_offset_ms"], dtype=np.float64)
+        weights = np.asarray(result["weights"], dtype=np.float64)
+        # True only when the camera instant actually fell between two glove frames;
+        # a row that lands on a glove frame needs no interpolation.
+        glove.create_dataset("interpolated", data=(weights > 1e-9) & (weights < 1.0 - 1e-9))
+
+        state = out.create_group("state")
+        for name, values in result["state"].items():
+            if name == DISTRIBUTION_STATE:
+                state.create_dataset(name, data=values, compression="gzip", compression_opts=1)
+            else:
+                state.create_dataset(name, data=values)
+
+        cams = out.create_group("cameras")
+        for slot, payload in result["views"].items():
+            group = cams.create_group(slot)
+            group.create_dataset("frame_index", data=payload["frame_index"], dtype=np.int32)
+            group.create_dataset("dt_ms", data=payload["dt_ms"], dtype=np.float32)
+            group.create_dataset("timestamp_ns", data=payload["timestamp_ns"], dtype=np.int64)
+
+        out.attrs["format_version"] = ALIGNED_FORMAT_VERSION
+        out.attrs["summary"] = json.dumps(aligned_summary(result), ensure_ascii=False)
+    return path
+
+
+def aligned_summary(result: dict[str, Any]) -> dict[str, Any]:
+    span = result["glove_span_ms"]
+    weights = np.asarray(result["weights"], dtype=np.float64)
+    interpolated = int(np.count_nonzero((weights > 1e-9) & (weights < 1.0 - 1e-9)))
+    return {
+        "format_version": ALIGNED_FORMAT_VERSION,
+        "source": str(Path(result["recording"]).name),
+        "reference_camera": result["reference"],
+        "timebase": result["timebase"],
+        "camera_delay_ms": result["delay_ms"],
+        "rows": result["aligned_rows"],
+        "source_rows": {
+            "glove": result["glove_rows"],
+            "camera": result["camera_rows"],
+        },
+        "dropped_outside_overlap": result["dropped_outside"],
+        "interpolated_rows": interpolated,
+        "glove_span_ms": {
+            "median": round(float(np.median(span)), 3),
+            "p95": round(float(np.percentile(span, 95)), 3),
+            "max": round(float(np.max(span)), 3),
+            "rows_over_25ms": int(np.count_nonzero(span > 25.0)),
+            "rows_over_50ms": int(np.count_nonzero(span > 50.0)),
+        },
+        "camera_holes": result["holes"],
+        "clock_jumps": result["clock_jumps"],
+        "distribution_force": result["distribution"],
+        "quest": "not processed",
+    }
+
+
+def report(result: dict[str, Any], path: Path | None, delay_source: str) -> None:
+    summary = aligned_summary(result)
+    span_stats = summary["glove_span_ms"]
+    log("")
+    log(f"采集目录：{result['recording'].name}")
+    log(f"  时间基：{result['timebase']}"
+        + ("（单调钟，免疫 NTP）" if result["timebase"] == "mono" else "（墙钟，已查跳变）"))
+    log(f"  延迟补偿：-{result['delay_ms']:.1f} ms，来源 {delay_source}")
+    log(f"  手套 {result['glove_rows']} 帧 → 相机 {result['camera_rows']} 帧 → 对齐 {result['aligned_rows']} 行")
+    if result["dropped_outside"]:
+        log(f"  丢弃覆盖范围外 {result['dropped_outside']} 帧（相机与手套起停不同步）")
+    log("  插值跨度 median {:.2f} ms / p95 {:.2f} ms / max {:.2f} ms".format(
+        span_stats["median"], span_stats["p95"], span_stats["max"]))
+    ratio = summary["interpolated_rows"] / max(result["aligned_rows"], 1)
+    log(f"  真插值 {summary['interpolated_rows']} 行（{ratio * 100:.1f}%），其余正好落在手套帧上")
+    log(f"  相机空洞 {result['holes']} 处（>{HOLE_FACTOR}× 中位间隔）")
+    if result["timebase"] == "unix" and result["clock_jumps"]:
+        warn(f"手套墙钟出现 {result['clock_jumps']} 次跳变，跨跳变处插值不可信，建议 --timebase mono")
+    log("  分布力：已插值" if result["distribution"] == "interpolated"
+        else f"  分布力：{result['distribution']}")
+    if path is not None:
+        log(f"  输出：{path}")
+    span = np.asarray(result["glove_span_ms"], dtype=np.float64)
+    wide = int(np.count_nonzero(span > 25.0))
+    rate = result["aligned_rows"] / max((result["timestamp_ns"][-1] - result["timestamp_ns"][0]) / 1e9, 1e-9)
+    log(f"  有效采样率 {rate:.1f} Hz；跨度 >25 ms 的行 {wide} 行（{wide / max(span.size, 1) * 100:.1f}%）")
+    if wide * 20 > span.size:
+        warn("超过 5% 的行跨了两帧以上手套数据，插值可信度低：先查手套帧间隔空洞（B8）")
+    else:
+        log("  质量判据：跨度分布正常（<5% 的行超过 25 ms）")
+    very_wide = int(np.count_nonzero(span > 50.0))
+    if very_wide:
+        warn(f"{very_wide} 行跨度 >50 ms（最多跨 {span.max():.0f} ms），这些行是硬猜出来的，"
+             "训练时可考虑剔除；对应位置是手套帧丢失的空洞")
+
+
+def gates(result: dict[str, Any]) -> list[str]:
+    """Hard checks; a non-empty list means the output should not be trusted."""
+    problems: list[str] = []
+    ts = result["timestamp_ns"]
+    if not np.all(np.diff(ts) > 0):
+        problems.append("主时间轴非严格递增")
+    joints = result["state"].get("joint_angles_deg")
+    if joints is not None and np.isnan(np.asarray(joints, dtype=np.float64)).any():
+        problems.append("joint_angles_deg 含 NaN")
+    counts = result["state"].get("distribute_counts")
+    if counts is not None:
+        totals = np.asarray(counts).sum(axis=1)
+        if np.any(totals != 444):
+            bad = int(np.count_nonzero(totals != 444))
+            problems.append(f"{bad} 行的 distribute_counts 合计不是 444")
+    if result["aligned_rows"] < 100:
+        problems.append(f"对齐后只有 {result['aligned_rows']} 行，少于 100")
+    span = np.asarray(result["glove_span_ms"], dtype=np.float64)
+    wide = int(np.count_nonzero(span > 25.0))
+    if wide * 20 > span.size:
+        problems.append(f"{wide}/{span.size} 行跨两帧以上手套数据（>5%），插值不可信")
+    very_wide = int(np.count_nonzero(span > 50.0))
+    if very_wide * 100 > span.size:
+        problems.append(f"{very_wide}/{span.size} 行跨度 >50 ms（>1%），这些行是硬猜的")
+    return problems
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="align_capture.py",
+        description="把手套(cap)流按相机帧时刻重采样：相机时间戳为主轴，cap 线性插值到该时刻。",
+    )
+    parser.add_argument("path", nargs="?", default=".", help="采集目录，或 recordings 根目录（批量）")
+    parser.add_argument("--output", default=None, help="输出目录，默认 <采集目录>/aligned")
+    parser.add_argument("--reference", default=None, help="作为采样网格的相机槽位，默认第一个（通常是 cam0）")
+    parser.add_argument("--timebase", choices=("auto", "mono", "unix"), default="auto",
+                        help="auto 优先单调钟；linux 后端没有单调钟时自动退回墙钟")
+    parser.add_argument("--delay-ms", type=float, default=None,
+                        help=f"相机延迟补偿（毫秒），默认读台账，读不到用 {DEFAULT_DELAY_MS}")
+    parser.add_argument("--no-delay", action="store_true", help="不减延迟（调试用，正式数据别用）")
+    parser.add_argument("--omit-distribution", action="store_true", help="不输出 10x119x3 分布力")
+    parser.add_argument("--nearest-distribution", action="store_true",
+                        help="分布力只取最近帧，不做插值（省一半读取）")
+    parser.add_argument("--keep-outside", action="store_true",
+                        help="保留落在手套覆盖范围外的相机帧（默认丢弃）")
+    parser.add_argument("--dry-run", action="store_true", help="只统计，不写文件")
+    parser.add_argument("--strict", action="store_true", help="质量判据不过就以非 0 退出")
+    parser.add_argument("--clear-write-flag", action="store_true",
+                        help="采集被强杀导致 data.h5 打不开时，清掉超级块里的写标志（等价 h5clear -s）")
+    return parser
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+
+    try:
+        recordings = find_recordings(Path(args.path).expanduser().resolve())
+    except AlignError as exc:
+        error(str(exc))
+        return 2
+
+    delay_ms, delay_source = resolve_delay(args.delay_ms, args.no_delay)
+    log(f"[INFO] 相机延迟补偿：{delay_ms:.1f} ms（{delay_source}）")
+
+    failures = 0
+    for recording in recordings:
+        try:
+            result = align_recording(
+                recording=recording,
+                reference=args.reference,
+                timebase=args.timebase,
+                delay_ms=delay_ms,
+                omit_distribution=args.omit_distribution,
+                interpolate_distribution=not args.nearest_distribution,
+                keep_outside=args.keep_outside,
+                clear_flag=args.clear_write_flag,
+            )
+        except AlignError as exc:
+            error(f"{recording.name}: {exc}")
+            failures += 1
+            continue
+
+        out_dir = Path(args.output).expanduser().resolve() if args.output else recording / "aligned"
+        path = None
+        if not args.dry_run:
+            path = write_aligned(result, out_dir)
+        report(result, path, delay_source)
+
+        problems = gates(result)
+        if problems:
+            failures += 1
+            for problem in problems:
+                warn(f"{recording.name}: {problem}")
+        else:
+            log("  自检：主时间轴严格递增、关节角无 NaN、counts 合计 444 —— 通过")
+
+    if failures and args.strict:
+        error(f"{failures} 个采集目录未通过")
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
