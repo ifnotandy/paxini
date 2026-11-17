@@ -38,7 +38,7 @@ python3.10 capture/collect_cap.py --cap-side right --no-quest
 | 相机 0 fps / 5 fps | 日志里的「相机后端」是不是被强制成 `linux` 了 |
 | 相机 20 秒不出图 | 先 `--camera-mode cam0` 排除带宽；再验分辨率是否被支持 |
 | 等 Quest 超时 120 s | 没有头显就加 `--no-quest` |
-| 采完没有 `manifest.json` | 被强杀了。`data.h5` 尾部最多丢 100 行，重采 |
+| 采完没有 `manifest.json` | 被强杀了。数据落在最后一个满批之前（每批已 flush），先 `--clear-write-flag` 再读；2026-11-13 那批老文件没这个保护，全废 |
 
 ## 3. 改 HDF5 字段
 
