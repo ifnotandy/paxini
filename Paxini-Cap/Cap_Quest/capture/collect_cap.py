@@ -147,6 +147,12 @@ QUEST_COORDINATE_FRAME = {
 }
 STOP_EVENT = threading.Event()
 FORCE_EXIT_WATCHDOG_ARMED = threading.Event()
+#: How long the watchdog may spend trying to save the file before giving up.
+EMERGENCY_SAVE_TIMEOUT_S = 5.0
+
+# The recorder writing right now, so a signal handler or the shutdown watchdog can
+# still save it. Module level because a signal handler only receives (signum, frame).
+ACTIVE_RECORDER: "Hdf5Recorder | None" = None
 SHUTDOWN_TIMEOUT_S = 30.0
 # 粗检阈值：相机/Quest 的时间窗与手套差太多就是录错了对象，只提示不纠正
 SESSION_START_TOLERANCE_S = 5.0
@@ -197,15 +203,36 @@ def call_with_timeout(
     return True, None
 
 
+def emergency_save_and_exit(reason: str, exit_code: int = 130) -> None:
+    """Save whatever the recorder still holds, then leave.
+
+    Used by the shutdown watchdog (cleanup hung past the budget) and by a second
+    Ctrl+C. Only the pending rows are at stake here, but they are the difference
+    between a readable file and a 48-byte stub, so it is worth a few milliseconds.
+    """
+    recorder = ACTIVE_RECORDER
+    if recorder is None:
+        error(f"{reason}：没有活动中的写入器，直接退出")
+    else:
+        log(f"[INFO] {reason}：先把内存里未落盘的行写进 data.h5 …")
+        if recorder.emergency_save(EMERGENCY_SAVE_TIMEOUT_S):
+            warn("已落盘（含未满一批的余数），但 manifest.json 没写、写标志可能未清")
+        else:
+            warn(
+                "主线程卡在 HDF5 调用里，抢不到锁，无法落盘：数据到最后一个已 flush 的批；"
+                "强行并发写只会弄坏文件，所以这里直接退出"
+            )
+    interrupt_running_cameras()
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(exit_code)
+
+
 def force_exit_after_watchdog() -> None:
     time.sleep(SHUTDOWN_TIMEOUT_S)
     if not STOP_EVENT.is_set():
         return
-    error(f"安全清理超过 {SHUTDOWN_TIMEOUT_S:g} 秒，强制退出进程")
-    interrupt_running_cameras()
-    sys.stdout.flush()
-    sys.stderr.flush()
-    os._exit(130)
+    emergency_save_and_exit(f"安全清理超过 {SHUTDOWN_TIMEOUT_S:g} 秒")
 
 
 @dataclass(frozen=True, slots=True)
@@ -548,6 +575,10 @@ class Hdf5Recorder:
         self.flush_rows = max(1, flush_rows)
 
         self.file: h5py.File | None = None
+        # Serialises every HDF5 mutation. The shutdown watchdog runs in its own
+        # thread and may try to save the file while the main thread is mid-write;
+        # without this lock a reentrant HDF5 call from two threads is undefined.
+        self._lock = threading.Lock()
         self.cap_rows = 0
         self.quest_rows = 0
         self._cap_pending: list[dict[str, Any]] = []
@@ -680,30 +711,57 @@ class Hdf5Recorder:
             self.flush_quest()
 
     def flush_cap(self) -> None:
-        if not self._cap_pending:
+        with self._lock:
+            self._flush_cap_locked()
+
+    def _flush_cap_locked(self) -> None:
+        """Caller must hold ``self._lock``."""
+        if self.file is None or not self._cap_pending:
             return
         batch = self._cap_pending
         self._cap_pending = []
         start = self.cap_rows
         rows = start + len(batch)
-        for name, dataset in self._cap_datasets.items():
-            values = np.array([item[name] for item in batch], dtype=dataset.dtype)
+        # Build every array before touching the file. If one dataset's values
+        # cannot be built (missing key, bad dtype), no dataset has been resized
+        # yet, so the file stays at a consistent row count instead of half-written.
+        prepared: list[tuple[h5py.Dataset, np.ndarray]] = [
+            (dataset, np.array([item[name] for item in batch], dtype=dataset.dtype))
+            for name, dataset in self._cap_datasets.items()
+        ]
+        for dataset, values in prepared:
             dataset.resize((rows, *dataset.shape[1:]))
             dataset[start:rows] = values
         self.cap_rows = rows
+        # Flush after every batch, not only in close(): until HDF5 pushes its
+        # metadata to the file, a killed process leaves a data.h5 with no tree at
+        # all (root group header is never written) and the whole capture is lost.
+        # Measured cost on this machine: 0.07 ms per 100-row batch (~0.8% of the
+        # 10 ms write). Note this is flush(), not fsync() — it survives a killed
+        # process but not a power cut.
+        self.file.flush()
 
     def flush_quest(self) -> None:
-        if not self._quest_pending:
+        with self._lock:
+            self._flush_quest_locked()
+
+    def _flush_quest_locked(self) -> None:
+        """Caller must hold ``self._lock``."""
+        if self.file is None or not self._quest_pending:
             return
         batch = self._quest_pending
         self._quest_pending = []
         start = self.quest_rows
         rows = start + len(batch)
-        for path, dataset in self._quest_datasets.items():
-            values = np.array([item[path] for item in batch], dtype=dataset.dtype)
+        prepared: list[tuple[h5py.Dataset, np.ndarray]] = [
+            (dataset, np.array([item[path] for item in batch], dtype=dataset.dtype))
+            for path, dataset in self._quest_datasets.items()
+        ]
+        for dataset, values in prepared:
             dataset.resize((rows, *dataset.shape[1:]))
             dataset[start:rows] = values
         self.quest_rows = rows
+        self.file.flush()
 
     def write_camera_timestamps(
         self,
@@ -719,44 +777,61 @@ class Hdf5Recorder:
         left absent — readers detect that with ``"timestamp_monotonic_ns" in
         group`` or via ``manifest.cameras.per_camera.<id>.monotonic_available``.
         """
-        assert self.file is not None
         timestamps = np.asarray(timestamps_ns, dtype=np.int64)
         if timestamps.size > 1 and np.any(np.diff(timestamps) < 0):
             raise RuntimeError(
                 f"PXCap {camera_id} 摄像头时间戳非单调递增，数据不可用"
             )
-        group = self.file["cameras"][camera_id]
-        if "timestamp_unix_ns" in group:
-            del group["timestamp_unix_ns"]
-        group.create_dataset("timestamp_unix_ns", data=timestamps, dtype=np.int64)
-        info: dict[str, Any] = {
-            "frames": int(timestamps.size),
-            "first_timestamp_unix_ns": (
-                int(timestamps[0]) if timestamps.size else None
-            ),
-            "last_timestamp_unix_ns": (
-                int(timestamps[-1]) if timestamps.size else None
-            ),
-        }
+        mono: np.ndarray | None = None
         if monotonic_ns is not None and len(monotonic_ns) > 0:
             mono = np.asarray(monotonic_ns, dtype=np.int64)
-            if "timestamp_monotonic_ns" in group:
-                del group["timestamp_monotonic_ns"]
-            group.create_dataset(
-                "timestamp_monotonic_ns", data=mono, dtype=np.int64
-            )
-            info["monotonic_available"] = True
-            info["first_timestamp_monotonic_ns"] = (
-                int(mono[0]) if mono.size else None
-            )
-            info["last_timestamp_monotonic_ns"] = (
-                int(mono[-1]) if mono.size else None
-            )
-        else:
-            if "timestamp_monotonic_ns" in group:
-                del group["timestamp_monotonic_ns"]
-            info["monotonic_available"] = False
-        return info
+            # Both columns index the same frames. A length mismatch would give the
+            # group two datasets with different first dimensions, which nothing
+            # downstream checks for (cameras/ is excluded from verify_rows) and
+            # which silently breaks frame pairing in Paxini-Align.
+            if mono.size != timestamps.size:
+                raise RuntimeError(
+                    f"PXCap {camera_id} 墙钟 {timestamps.size} 个、单调钟 {mono.size} 个，"
+                    "同一路相机的两列长度必须相等"
+                )
+            if mono.size > 1 and np.any(np.diff(mono) < 0):
+                raise RuntimeError(
+                    f"PXCap {camera_id} 摄像头单调钟时间戳非单调递增，数据不可用"
+                )
+        with self._lock:
+            assert self.file is not None
+            group = self.file["cameras"][camera_id]
+            if "timestamp_unix_ns" in group:
+                del group["timestamp_unix_ns"]
+            group.create_dataset("timestamp_unix_ns", data=timestamps, dtype=np.int64)
+            info: dict[str, Any] = {
+                "frames": int(timestamps.size),
+                "first_timestamp_unix_ns": (
+                    int(timestamps[0]) if timestamps.size else None
+                ),
+                "last_timestamp_unix_ns": (
+                    int(timestamps[-1]) if timestamps.size else None
+                ),
+            }
+            if mono is not None:
+                if "timestamp_monotonic_ns" in group:
+                    del group["timestamp_monotonic_ns"]
+                group.create_dataset(
+                    "timestamp_monotonic_ns", data=mono, dtype=np.int64
+                )
+                info["monotonic_available"] = True
+                info["first_timestamp_monotonic_ns"] = (
+                    int(mono[0]) if mono.size else None
+                )
+                info["last_timestamp_monotonic_ns"] = (
+                    int(mono[-1]) if mono.size else None
+                )
+            else:
+                if "timestamp_monotonic_ns" in group:
+                    del group["timestamp_monotonic_ns"]
+                info["monotonic_available"] = False
+            self.file.flush()
+            return info
 
     # -- derived values ----------------------------------------------------
     @property
@@ -791,53 +866,64 @@ class Hdf5Recorder:
     # -- verification ------------------------------------------------------
     def verify_rows(self) -> dict[str, Any]:
         """Each group's datasets must agree with that group's own row count."""
-        assert self.file is not None
-        self.flush_cap()
-        self.flush_quest()
-        mismatches: list[dict[str, Any]] = []
-        checked = 0
+        with self._lock:
+            assert self.file is not None
+            self._flush_cap_locked()
+            self._flush_quest_locked()
+            mismatches: list[dict[str, Any]] = []
+            checked = 0
 
-        def visit(name: str, obj: Any) -> None:
-            nonlocal checked
-            if not isinstance(obj, h5py.Dataset):
-                return
-            if name.startswith("cap/"):
-                expected = self.cap_rows
-            elif name.startswith("quest/"):
-                expected = self.quest_rows
-            else:
-                return
-            checked += 1
-            if obj.shape[0] != expected:
-                mismatches.append(
-                    {
-                        "dataset": name,
-                        "rows": int(obj.shape[0]),
-                        "expected": expected,
-                    }
-                )
+            def visit(name: str, obj: Any) -> None:
+                nonlocal checked
+                if not isinstance(obj, h5py.Dataset):
+                    return
+                if name.startswith("cap/"):
+                    expected = self.cap_rows
+                elif name.startswith("quest/"):
+                    expected = self.quest_rows
+                else:
+                    return
+                checked += 1
+                if obj.shape[0] != expected:
+                    mismatches.append(
+                        {
+                            "dataset": name,
+                            "rows": int(obj.shape[0]),
+                            "expected": expected,
+                        }
+                    )
 
-        self.file.visititems(visit)
-        return {
-            "cap_rows": self.cap_rows,
-            "quest_rows": self.quest_rows,
-            "datasets_checked": checked,
-            "row_mismatch": mismatches,
-        }
+            self.file.visititems(visit)
+            return {
+                "cap_rows": self.cap_rows,
+                "quest_rows": self.quest_rows,
+                "datasets_checked": checked,
+                "row_mismatch": mismatches,
+            }
 
     def write_meta(self, metadata: dict[str, Any]) -> None:
-        assert self.file is not None
-        group = self.file["meta"]
-        for key, value in metadata.items():
-            group.attrs[key] = json.dumps(
-                value,
-                ensure_ascii=False,
-                allow_nan=False,
-            )
+        with self._lock:
+            if self.file is None:
+                # A shutdown watchdog may have closed the file between manifest()
+                # and here; losing meta attributes is better than a traceback in
+                # the last second of the run.
+                warn("data.h5 已关闭，meta 属性未写入")
+                return
+            group = self.file["meta"]
+            for key, value in metadata.items():
+                group.attrs[key] = json.dumps(
+                    value,
+                    ensure_ascii=False,
+                    allow_nan=False,
+                )
 
     def manifest(self, extra: dict[str, Any]) -> dict[str, Any]:
-        self.flush_cap()
-        self.flush_quest()
+        with self._lock:
+            self._flush_cap_locked()
+            self._flush_quest_locked()
+            return self._manifest_locked(extra)
+
+    def _manifest_locked(self, extra: dict[str, Any]) -> dict[str, Any]:
         ended_at = datetime.now().astimezone()
         elapsed_s = (time.monotonic_ns() - self.started_monotonic_ns) / 1e9
         return {
@@ -869,10 +955,15 @@ class Hdf5Recorder:
         self.close()
 
     def close(self) -> None:
+        with self._lock:
+            self._close_locked()
+
+    def _close_locked(self) -> None:
+        """Caller must hold ``self._lock``."""
         if self.file is None:
             return
-        self.flush_cap()
-        self.flush_quest()
+        self._flush_cap_locked()
+        self._flush_quest_locked()
         for dataset in self._cap_datasets.values():
             if dataset.shape[0] != self.cap_rows:
                 dataset.resize((self.cap_rows, *dataset.shape[1:]))
@@ -882,6 +973,29 @@ class Hdf5Recorder:
         self.file.flush()
         self.file.close()
         self.file = None
+
+    def emergency_save(self, timeout_s: float = 5.0) -> bool:
+        """Last-chance save from another thread (shutdown watchdog / second Ctrl+C).
+
+        Takes the recorder lock with a timeout so it never blocks forever: if the
+        main thread is stuck *inside* HDF5, grabbing the lock would deadlock, and
+        a concurrent write would corrupt the file — in that case return False and
+        let the caller hard-exit, which keeps the data already flushed.
+
+        Returns True when the file was closed cleanly (pending rows included).
+        """
+        if self.file is None:
+            return True  # a normal shutdown already finished the job
+        if not self._lock.acquire(timeout=max(0.1, timeout_s)):
+            return False
+        try:
+            self._close_locked()
+            return True
+        except Exception as exc:  # a broken file is still better than no file
+            warn(f"紧急落盘失败：{exc.__class__.__name__}: {exc}")
+            return False
+        finally:
+            self._lock.release()
 
 
 class HandCollector:
@@ -1736,11 +1850,8 @@ def list_devices(backend: str = "linux", ffmpeg_win: str | None = None) -> int:
 
 def handle_stop_signal(signum: int, _frame: Any) -> None:
     if STOP_EVENT.is_set():
-        error("再次收到停止信号，立即强制退出")
-        interrupt_running_cameras()
-        sys.stdout.flush()
-        sys.stderr.flush()
-        os._exit(130)
+        emergency_save_and_exit("再次收到停止信号，不再等安全清理", exit_code=130)
+        return
     log(
         f"\n[INFO] 收到信号 {signum}，正在安全停止；"
         f"{SHUTDOWN_TIMEOUT_S:g} 秒内未退出可再次按 Ctrl+C 强制结束"
@@ -2052,6 +2163,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         recorder.__enter__()
         recorder_entered = True
+        global ACTIVE_RECORDER
+        ACTIVE_RECORDER = recorder
         log(f"[INFO] 数据写入：{output_dir}")
 
         if args.view:
@@ -2224,8 +2337,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                             "两者可能不在同一段录制里（仅提示，文件里不做对齐）"
                         )
                 # Quest 只剩 SDK 时间戳，域未知，无法与手套的单调钟比较，
-                # 因此这里不做覆盖检查；两路是否同场只能靠行数是否都非 0 粗判
-                if cap_window is not None and recorder.quest_rows == 0:
+                # 因此这里不做覆盖检查；两路是否同场只能靠行数是否都非 0 粗判。
+                # --no-quest 时 quest 组本来就是 0 行，别报一条假警告。
+                if not args.no_quest and recorder.quest_rows == 0:
                     warn("本次没有采到任何 Quest 样本（quest 组为 0 行）")
 
             verify = recorder.verify_rows()
