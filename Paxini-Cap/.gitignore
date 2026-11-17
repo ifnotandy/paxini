@@ -5,7 +5,12 @@ __pycache__/
 
 # 本地设备配置与采集数据
 Cap_Quest/.quest_ip
-Cap_Quest/recordings/
+Cap_Quest/recordings/*
+
+# 例外：2026-11-17 的三份样例采集入库（与根 .gitignore 同步维护）
+!Cap_Quest/recordings/data_20261117_1/
+!Cap_Quest/recordings/data_20261117_2/
+!Cap_Quest/recordings/data_20261117_3/
 
 # 大体积厂商二进制（只保留 SHA256SUMS 与说明）
 sdk/**/*.deb

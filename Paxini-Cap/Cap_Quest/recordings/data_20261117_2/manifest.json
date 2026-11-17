@@ -1,0 +1,176 @@
+{
+  "format_version": 4,
+  "started_at": "2026-11-17T22:27:37.288+08:00",
+  "ended_at": "2026-11-17T22:28:03.627+08:00",
+  "cap_side": "right",
+  "rows": 2587,
+  "quest_rows": 0,
+  "actual_rate_hz": 115.11261023435615,
+  "duration_s": 26.339708236,
+  "sample_span_s": 22.464958398,
+  "alignment": "none (raw per-source timestamps only)",
+  "pose": {
+    "source": "controller",
+    "side": "right",
+    "order": [
+      "x",
+      "y",
+      "z",
+      "qx",
+      "qy",
+      "qz",
+      "qw"
+    ],
+    "coordinate_frame": {
+      "name": "xrobotoolkit_quest_tracking_origin",
+      "convention": "Unity tracking-origin frame (no additional transform)",
+      "handedness": "left-handed",
+      "axes": "+X right, +Y up, +Z forward",
+      "origin": "XRoboToolKit APK tracking origin; system recentering can change it",
+      "translation_unit": "m",
+      "rotation": "quaternion xyzw"
+    }
+  },
+  "output": {
+    "hdf5": "data.h5",
+    "cameras": "cameras/",
+    "camera_ids": [
+      "right_cam0",
+      "right_cam1"
+    ]
+  },
+  "hand": {
+    "port": "/dev/ttyACM0",
+    "target_rate_hz": 120,
+    "actual_rate_hz": 115.11261023435615,
+    "sdk_version": "1.0.0.0 20260812 20:16",
+    "controller_version": "R_SSG_Occam_V2.0.2_Hardware_V2.0.2",
+    "sensor_versions": [
+      "PAXINI PXSR-CMDCP10B-v1.0.3",
+      "PAXINI PXSR-CMDIP10D-v1.0.1",
+      "PAXINI PXSR-CMDDP10E-v1.0.3",
+      "PAXINI PXSR-CMDDP10E-v1.0.3",
+      "PAXINI PXSR-CMDDP10E-v1.0.3",
+      "PAXINI PXSR-CMDCP10C-v1.0.3",
+      "PAXINI PXSR-CMDCP10B-v1.0.3"
+    ],
+    "sn": "DCG04R48500093",
+    "fault": {
+      "sensor_fault_count": 0,
+      "magnetic_encoder_fault_count": 0,
+      "sensor_faults": [],
+      "magnetic_encoder_faults": []
+    },
+    "fault_error": null,
+    "info_errors": {},
+    "snapshot_errors": 0,
+    "queue_overflows": 0,
+    "callback_calls": 2587,
+    "callback_mean_ms": 0.4548883788171627,
+    "callback_max_ms": 1.223708,
+    "distribution_included": true
+  },
+  "quest": {
+    "enabled": false,
+    "timestamp_source": "sdk_provided",
+    "timestamp_fields": [
+      "sdk_timestamp_ns",
+      "body_timestamp_ns",
+      "motion_timestamp_ns",
+      "body_joints_timestamp_ns"
+    ],
+    "error": null,
+    "rows": 0,
+    "samples_dropped": 0,
+    "setup_adb_skipped": false,
+    "apk_package": "com.xrobotoolkit.client.quest",
+    "adb_serial": null,
+    "adb_wireless": null,
+    "ready_before_hand_start": false,
+    "ready_wait_seconds": null,
+    "required_consecutive_samples": 3,
+    "poll_rate_hz": 120.0,
+    "polls": 0,
+    "poller_overruns": 0
+  },
+  "cameras": {
+    "enabled": true,
+    "backend": "wsl",
+    "timestamp_clock": "host_unix_ns (epoch_unix_ns + relative pts)",
+    "mode": "both",
+    "cap_side": "right",
+    "slots": [
+      "cam0",
+      "cam1"
+    ],
+    "camera_ids": [
+      "right_cam0",
+      "right_cam1"
+    ],
+    "ready_before_hand_start": true,
+    "ready_wait_seconds": 2.792948467999963,
+    "per_camera": {
+      "right_cam0": {
+        "device": "video=@device_pnp_\\\\?\\usb#vid_0c45&pid_000c&mi_00#7&2649d7b2&0&0000#{65e8773d-8f56-11d0-a3b9-00a0c9223196}\\global",
+        "backend": "wsl",
+        "file": "cameras/right_cam0.mkv",
+        "requested_width": 1280,
+        "requested_height": 720,
+        "requested_fps": 30.0,
+        "codec": "copy",
+        "epoch_unix_ns": 1794925655782363206,
+        "epoch_monotonic_ns": 943501636372,
+        "error": null,
+        "frames": 727,
+        "width": 1280,
+        "height": 720,
+        "avg_fps": 30.0,
+        "actual_fps": 30.00123972064961,
+        "duration_s": 24.199,
+        "first_timestamp_unix_ns": 1794925655782363206,
+        "last_timestamp_unix_ns": 1794925679981363206,
+        "monotonic_available": true,
+        "first_timestamp_monotonic_ns": 943501636372,
+        "last_timestamp_monotonic_ns": 967700636372
+      },
+      "right_cam1": {
+        "device": "video=@device_pnp_\\\\?\\usb#vid_0c45&pid_00cc&mi_00#7&1ca19fa6&0&0000#{65e8773d-8f56-11d0-a3b9-00a0c9223196}\\global",
+        "backend": "wsl",
+        "file": "cameras/right_cam1.mkv",
+        "requested_width": 1280,
+        "requested_height": 720,
+        "requested_fps": 30.0,
+        "codec": "copy",
+        "epoch_unix_ns": 1794925655853946387,
+        "epoch_monotonic_ns": 943573218978,
+        "error": null,
+        "frames": 742,
+        "width": 1280,
+        "height": 720,
+        "avg_fps": 30.0,
+        "actual_fps": 30.001214624073846,
+        "duration_s": 24.699,
+        "first_timestamp_unix_ns": 1794925655853946387,
+        "last_timestamp_unix_ns": 1794925680552946387,
+        "monotonic_available": true,
+        "first_timestamp_monotonic_ns": 943573218978,
+        "last_timestamp_monotonic_ns": 968272218978
+      }
+    }
+  },
+  "verify": {
+    "cap_rows": 2587,
+    "quest_rows": 0,
+    "datasets_checked": 37,
+    "row_mismatch": []
+  },
+  "env": {
+    "python": "3.10.22",
+    "platform": "Linux-6.18.33.2-microsoft-standard-WSL2-x86_64-with-glibc2.39",
+    "numpy": "2.2.6",
+    "h5py": "3.16.0",
+    "ffmpeg": "ffmpeg version 7.0.2-static https://johnvansickle.com/ffmpeg/  Copyright (c) 2000-2024 the FFmpeg developers",
+    "ffmpeg_path": "/home/andy/bin/ffmpeg"
+  },
+  "error": null
+}

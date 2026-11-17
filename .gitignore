@@ -5,9 +5,19 @@
 
 # ---------- 采集数据 / 录像（体积极大，仅保留本地）----------
 厂商数据采集/
-**/recordings/
+**/recordings/*
 *.mkv
 *.mp4
+
+# 例外：2026-11-17 的三份样例采集作为格式参考长期入库。
+# 后续新增采集仍然不入库，要入库得在这里逐目录加白名单。
+!Paxini-Cap/Cap_Quest/recordings/data_20261117_1/
+!Paxini-Cap/Cap_Quest/recordings/data_20261117_2/
+!Paxini-Cap/Cap_Quest/recordings/data_20261117_3/
+!Paxini-Cap/Cap_Quest/recordings/data_20261117_*/cameras/*.mkv
+# 采样目录里的运行时副产物不随数据入库
+Paxini-Cap/Cap_Quest/recordings/data_20261117_*/cameras/*.log
+Paxini-Cap/Cap_Quest/recordings/data_20261117_*/cameras/*.progress
 
 # ---------- 厂商安装包与二进制（改放 GitHub Release）----------
 *.deb
