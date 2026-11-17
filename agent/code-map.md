@@ -14,7 +14,17 @@
 | 改配置加载/优先级 | `capture/collect_cap.py` | `load_config_file()`(:1459)、`apply_config()`(:1484) | `selftest` 的 "配置" 组 |
 | 采集主循环节拍 | `capture/collect_cap.py` | `pump_and_record()`(:1749) | 跑一次采集看 `manifest.row_mismatch` |
 | 回调线程入队 | `capture/collect_cap.py` | `snapshot_cap_frame()`(:284) | 只做拷贝，别在这里写盘 |
-| 批量落盘策略 | `capture/collect_cap.py` | `Hdf5Recorder.write_cap()`(:661)、`FLUSH_ROWS` | flush 时机影响中途读文件的结果 |
+| 批量落盘策略 | `capture/collect_cap.py` | `Hdf5Recorder.write_cap()`(:696)、`flush_cap()`(:713) / `_flush_cap_locked()`、`FLUSH_ROWS` | flush 时机影响中途读文件的结果 |
+| 终止时落盘 | 同上 | `emergency_save()`(:977)、`emergency_save_and_exit()`(:206) | `selftest` 的"收尾/紧急落盘"三项 |
+
+**并发模型（改这里之前必读）**：`Hdf5Recorder` 用一把**非重入** `Lock` 串行化所有 HDF5
+写操作，因为看门狗与信号处理器会在主线程写入的过程中试图落盘。因此：
+
+- 公共方法（`flush_cap` / `close` / `verify_rows` / `manifest` / `write_meta` /
+  `write_camera_timestamps`）自己拿锁，锁内只能调 `_flush_cap_locked` / `_flush_quest_locked`
+  / `_close_locked` / `_manifest_locked` 这些"已持锁"版本，否则死锁
+- `flush_cap` 先把这一批的数组全部构造完再统一 `resize`：中途抛异常时数据集都停在旧行数，
+  不会出现"前 4 个数据集多 100 行、后 3 个没有"的错位
 | 相机完整的 ffmpeg 命令 | `capture/camera_ffmpeg.py` | `FfmpegCamera.command()`(:448) | 两后端各跑一次 `--list-devices` |
 | epoch 锚定（wsl 后端） | `capture/camera_ffmpeg.py` | `_watch_first_frame()`(:540) | 跑 `latency/` 量出来的值 |
 | 每帧时间戳回填 | `capture/camera_ffmpeg.py` | `probe()`(:755) → `probe_frames()`(:261) | 采集后看 `cameras/*/timestamp_unix_ns` 是否单调 |
@@ -27,6 +37,19 @@
 | 相机延迟测量（WSL 路径） | `latency/measure_camera_latency_wsl.py` | 整份，自包含；需在 Windows 侧执行；默认逐路测 cam0/cam1 | 跑一次看 IQR 与解码率 |
 | 相机延迟测量（原生 Ubuntu 路径） | `latency/measure_camera_latency.py` | 整份，复用 `FfmpegCamera(backend="linux")`；默认逐路测 cam0/cam1 | 跑一次看 IQR 与前后半段漂移 |
 | 延迟测量台账 | `latency/latency_records.py` | 纯标准库 + PyYAML，两个测量脚本共用 | 改字段要同步 `records/*.yaml` 与下游读法 |
+
+## Align 侧：下游重采样
+
+| 任务 | 文件 | 具体位置 | 怎么验 |
+|---|---|---|---|
+| 改采样网格 / 参考相机 | `Paxini-Align/align_capture.py` | `align_recording()`(:302)、`--reference` | `selftest.py` 的"多相机最近帧"项 |
+| 改插值方式 | 同上 | `lerp_rows()`(:225) / `nearest_rows()`(:254) | 合成线性信号零误差（selftest 第 1 项） |
+| 改延迟补偿 | 同上 | `resolve_delay()`(:172) | `--no-delay` 与默认值对照，差值应等于 Δ |
+| 改输出字段 | 同上 | `write_aligned()`(:462) | `selftest` 的"输出可重开"项 + 同步 `Paxini-Align/README.md` 字段表 |
+| 改质量判据 | 同上 | `gates()`(:563)、`report()`(:531) | `--strict` 跑一次真采集 |
+
+对齐层**只读** `data.h5`，绝不回写；改这里不会影响采集端，但改了输出布局要升
+`ALIGNED_FORMAT_VERSION`（当前 1，与采集端的 4 无关）。
 
 ## 关键常量（写代码前先看这几个）
 

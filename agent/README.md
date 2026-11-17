@@ -46,8 +46,8 @@ Paxini-Dex/   会运动
 | 手套零点标定 | 代码有，**无真机记录** |
 | 相机延迟测量 | 可用，WSL 路径实测 190~290 ms（整条链路会跳档，取 `latency/records/` 最近值） |
 | Quest 采集 | **未测**（无头显） |
-| 相机内参/外参 | **不存在** |
-| 跨源对齐 | **不存在**（设计给了下游 `Paxini-Align/`，未开工） |
+| 相机内参/外参 | **不做**（2026-11-17 决定划出范围，下游扩散模型只吃图像、不算位姿，见 `DOC/待验证清单.md` E8） |
+| 跨源对齐 | **已实现**：`Paxini-Align/align_capture.py` 相机时刻为主轴、手套线性插值（Quest 暂不处理） |
 
 一句话：**能采、能看，不能算三维、不能跨源配。**
 
@@ -61,7 +61,8 @@ Paxini-Dex/   会运动
 | 某列时间戳是什么时钟、怎么换算 | `Paxini-Cap/DOC/时间戳说明.md` | 其他都是摘要 |
 | 某项测过没有、实测值多少 | `Paxini-Cap/DOC/待验证清单.md` | README 只给结论 |
 | 相机延迟该用哪个数 | `Paxini-Cap/Cap_Quest/latency/records/<机器>.yaml` | README 只给量级，脚本负责写入 |
-| 标定要采哪几组量 | `Paxini-Cap/DOC/标定.md` | — |
+| 手套零点标定要不要跑、跑过没有 | `Paxini-Cap/DOC/待验证清单.md` B9 | 报告在 `calib/hand/`（不入库，只在本机） |
+| 相机标定为什么不做 | `Paxini-Cap/DOC/待验证清单.md` E8；设计留档 `DOC/标定.md` §2 | 别当任务排期 |
 | 某个参数什么意思 | `Paxini-Cap/Cap_Quest/README.md` §6.2 | `--help` 也是权威 |
 | 怎么开发、不能违反什么 | `Paxini-Cap/README.md` §0 | 本目录是补充 |
 | 怎么跑起来 | `Paxini-Cap/Cap_Quest/README.md` §1 | — |

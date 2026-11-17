@@ -25,6 +25,8 @@ import math
 import shutil
 import sys
 import tempfile
+import threading
+import time
 import types
 from pathlib import Path
 from typing import Any
@@ -66,6 +68,7 @@ from visualize import (
 
 PASSED: list[str] = []
 FAILED: list[str] = []
+SKIPPED: list[str] = []
 
 
 def check(name: str, condition: bool, detail: str = "") -> None:
@@ -73,6 +76,11 @@ def check(name: str, condition: bool, detail: str = "") -> None:
         PASSED.append(name)
     else:
         FAILED.append(f"{name}{(': ' + detail) if detail else ''}")
+
+
+def skip(name: str, reason: str) -> None:
+    """Record a group that cannot run here (missing ffprobe and the like)."""
+    SKIPPED.append(f"{name}：{reason}")
 
 
 class FakeVector:
@@ -502,6 +510,152 @@ def test_camera_monotonic(tmp_root: Path) -> None:
         info.get("monotonic_available") is False,
         str(info),
     )
+
+
+class _FlushCounter:
+    """Proxy around h5py.File that counts flush() calls."""
+
+    def __init__(self, target: Any, calls: list[int]) -> None:
+        self._target = target
+        self._calls = calls
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._target, name)
+
+    def flush(self, *args: Any, **kwargs: Any) -> Any:
+        self._calls.append(1)
+        return self._target.flush(*args, **kwargs)
+
+
+def test_flush_per_batch(tmp_root: Path) -> None:
+    """每批写盘后必须 flush，否则强杀（close() 不执行）会连元数据树一起丢。
+
+    2026-11-17：采集端原本只在 close() 里 flush，8 份被强杀的采集因此整份作废
+    （data.h5 只剩超级块，根组对象头从未落盘）。这里锁住两点：每满一批调一次
+    flush，且未满一批的行不提前进文件（所以强杀最多丢最后那批）。
+    """
+    output_dir = tmp_root / "flush"
+    calls: list[int] = []
+    recorder = Hdf5Recorder(
+        output_dir, "controller", "right", "right", (), True, flush_rows=5
+    )
+    recorder.__enter__()
+    recorder.file = _FlushCounter(recorder.file, calls)  # type: ignore[assignment]
+
+    base_unix_ns = 1_700_000_000_000_000_000
+    for index in range(12):
+        frame = make_frame(
+            base_unix_ns + index * 8_000_000,
+            6_300_000_000_000 + index * 8_000_000,
+        )
+        recorder.write_cap(snapshot_cap_frame(frame, True))
+
+    row_flushes = len(calls)
+    check(
+        "落盘/每满一批 flush 一次",
+        row_flushes >= 2,
+        f"12 行 / 每批 5 行 → flush {row_flushes} 次",
+    )
+    check(
+        "落盘/未满一批的 2 行留在内存（强杀最多丢最后一批）",
+        recorder.cap_rows == 10,
+        f"已落盘 {recorder.cap_rows} 行",
+    )
+    recorder.file = recorder.file._target  # type: ignore[union-attr]
+    recorder.__exit__(None, None, None)
+
+
+def test_emergency_save(tmp_root: Path) -> None:
+    """看门狗 / 二次 Ctrl+C 的落盘：把余数写进去，且绝不并发写同一个文件。"""
+    output_dir = tmp_root / "emergency"
+    recorder = Hdf5Recorder(
+        output_dir, "controller", "right", "right", (), True, flush_rows=5
+    )
+    recorder.__enter__()
+    base_unix_ns = 1_700_000_000_000_000_000
+    for index in range(12):
+        recorder.write_cap(
+            snapshot_cap_frame(
+                make_frame(
+                    base_unix_ns + index * 8_000_000,
+                    6_300_000_000_000 + index * 8_000_000,
+                ),
+                True,
+            )
+        )
+    saved = recorder.emergency_save(2.0)
+    with h5py.File(output_dir / "data.h5", "r") as handle:
+        rows = handle["cap/joint_angles_deg"].shape[0]
+        mismatch = handle["cap/encoder_raw"].shape[0]
+    check(
+        "收尾/紧急落盘把未满一批的余数也写进去",
+        saved and rows == 12 and mismatch == 12,
+        f"落盘 {rows} 行（写入 12 行、批 5）",
+    )
+    check("收尾/紧急落盘可重复调用不报错", recorder.emergency_save(1.0) is True)
+
+    locked = Hdf5Recorder(
+        tmp_root / "emergency_lock", "controller", "right", "right", (), True, flush_rows=5
+    )
+    locked.__enter__()
+    holding = threading.Event()
+    release = threading.Event()
+
+    def hold_lock() -> None:
+        with locked._lock:  # noqa: SLF001 - the lock is the thing under test
+            holding.set()
+            release.wait(3.0)
+
+    holder = threading.Thread(target=hold_lock, daemon=True)
+    holder.start()
+    holding.wait(2.0)
+    started = time.monotonic()
+    acquired = locked.emergency_save(0.3)
+    elapsed = time.monotonic() - started
+    release.set()
+    holder.join(2.0)
+    check(
+        "收尾/主线程持锁时按超时放弃，不并发写",
+        acquired is False and elapsed < 1.5,
+        f"等待 {elapsed:.2f} s 后返回 {acquired}",
+    )
+    locked.__exit__(None, None, None)
+
+
+def test_camera_timestamp_guards(tmp_root: Path) -> None:
+    """相机两列时间戳必须同长、且各自单调，否则下游按帧号配对会整体错位。"""
+    output_dir = tmp_root / "camguard"
+    recorder = Hdf5Recorder(output_dir, "controller", "right", "right", ("cam0",), True)
+    recorder.__enter__()
+    mismatch = None
+    try:
+        recorder.write_camera_timestamps(
+            "cam0", [1_700_000_000_000_000_000, 1_700_000_033_000_000_000],
+            monotonic_ns=[6_300_000_000_000],
+        )
+    except RuntimeError as exc:
+        mismatch = str(exc)
+    check("相机/两列长度不等时拒绝写入", mismatch is not None and "长度必须相等" in mismatch,
+          (mismatch or "没有抛错")[:40])
+
+    unsorted = None
+    try:
+        recorder.write_camera_timestamps(
+            "cam0",
+            [1_700_000_000_000_000_000, 1_700_000_033_000_000_000],
+            monotonic_ns=[6_300_000_033_000_000_000, 6_300_000_000_000_000_000],
+        )
+    except RuntimeError as exc:
+        unsorted = str(exc)
+    check("相机/单调钟列倒退时拒绝写入", unsorted is not None and "非单调递增" in unsorted,
+          (unsorted or "没有抛错")[:40])
+
+    info = recorder.write_camera_timestamps(
+        "cam0", [1_700_000_000_000_000_000, 1_700_000_033_000_000_000]
+    )
+    check("相机/只给墙钟列时 monotonic_available 为 False",
+          info["monotonic_available"] is False and info["frames"] == 2)
+    recorder.__exit__(None, None, None)
 
 
 def test_two_row_axes(tmp_root: Path) -> None:
@@ -1126,30 +1280,54 @@ def test_visualize(tmp_root: Path) -> None:
     check("可视化/载荷含四路关节角标签", len(payload["cap"]["angle_labels"]) == 4)
 
 
+def run_case(name: str, function: Any, *args: Any) -> None:
+    """Run one test group; an unexpected exception is a failure, not a crash.
+
+    Without this, a single environment-dependent group (for example ffprobe not
+    being installed) aborts the whole run *before* any result is printed, which
+    makes a missing dependency look like "the suite did nothing".
+    """
+    try:
+        function(*args)
+    except Exception as exc:  # noqa: BLE001 - reported as a failed check instead
+        check(f"{name}（未预期异常）", False, f"{exc.__class__.__name__}: {exc}")
+
+
 def main() -> int:
     tmp_root = Path(tempfile.mkdtemp(prefix="paxini-cap-selftest-"))
     try:
-        test_frame_parsing()
-        test_quest3_sample()
-        test_quest_row()
-        test_two_row_axes(tmp_root)
-        test_omit_distribution(tmp_root)
-        test_live_view_hook()
-        test_camera_monotonic(tmp_root)
-        test_config_file(tmp_root)
-        test_camera_backend(tmp_root)
-        test_camera_preview(tmp_root)
-        test_visualize(tmp_root)
-        test_visualize_video(tmp_root)
-        test_misc()
+        run_case("帧解析", test_frame_parsing)
+        run_case("Quest 样本", test_quest3_sample)
+        run_case("Quest 行", test_quest_row)
+        run_case("两轴", test_two_row_axes, tmp_root)
+        run_case("落盘", test_flush_per_batch, tmp_root)
+        run_case("收尾", test_emergency_save, tmp_root)
+        run_case("相机守卫", test_camera_timestamp_guards, tmp_root)
+        run_case("分布力", test_omit_distribution, tmp_root)
+        run_case("实时视图", test_live_view_hook)
+        run_case("相机单调钟", test_camera_monotonic, tmp_root)
+        run_case("配置", test_config_file, tmp_root)
+        if shutil.which("ffprobe"):
+            run_case("相机后端", test_camera_backend, tmp_root)
+            run_case("相机预览", test_camera_preview, tmp_root)
+        else:
+            skip("相机后端 / 相机预览", "本机找不到 ffprobe（这两组验的是 ffmpeg 命令拼装，需要在装好 ffmpeg+ffprobe 的环境跑）")
+        run_case("可视化", test_visualize, tmp_root)
+        run_case("可视化视频", test_visualize_video, tmp_root)
+        run_case("杂项", test_misc)
     finally:
         shutil.rmtree(tmp_root, ignore_errors=True)
 
     for name in PASSED:
         print(f"[通过] {name}")
+    for name in SKIPPED:
+        print(f"[跳过] {name}")
     for name in FAILED:
         print(f"[失败] {name}")
-    print(f"\n合计 {len(PASSED) + len(FAILED)} 项：通过 {len(PASSED)}，失败 {len(FAILED)}")
+    print(
+        f"\n合计 {len(PASSED) + len(FAILED)} 项：通过 {len(PASSED)}，失败 {len(FAILED)}"
+        + (f"，跳过 {len(SKIPPED)} 组" if SKIPPED else "")
+    )
     return 0 if not FAILED else 1
 
 

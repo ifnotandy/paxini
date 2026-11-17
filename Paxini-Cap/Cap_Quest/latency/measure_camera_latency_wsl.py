@@ -811,7 +811,7 @@ def measure_one(
     print(f"采集参数   {width}x{height}@{fps:g}  codec={codec}")
     print(f"录多久     {args.seconds:g} 秒")
     print(f"二维码     {args.qr_size} px / 目标 {args.qr_hz:g} Hz")
-    print(f"时钟域     Windows（本脚本在此执行，QR 与 epoch 同源）")
+    print("时钟域     Windows（本脚本在此执行，QR 与 epoch 同源）")
     print(f"输出       {output_dir}")
     print("-" * 62)
     print("把二维码窗口对准相机，占画面四分之一以上。")
