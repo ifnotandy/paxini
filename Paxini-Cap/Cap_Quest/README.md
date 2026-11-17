@@ -55,8 +55,19 @@ export PATH="$HOME/bin:$PATH"          # 静态版 ffmpeg/ffprobe
 python3.10 capture/collect_cap.py --list-devices
 ```
 
-`--list-devices` 打印串口（含 USB VID:PID 与 by-id）、V4L2 采集节点和 ffmpeg 版本。
-确认手套串口那行末尾是 `PXCap`（`USB=28e9:018a`）后再运行：
+`--list-devices` 打印串口（含 USB VID:PID 与 by-id）、视频设备和 ffmpeg 版本。
+先确认两件事：
+
+- **串口那行末尾是 `PXCap`（`USB=28e9:018a`）**。没有串口就回
+  [`../README.md` §2](../README.md#2-硬件接入) 重新 `usbipd attach`——
+  `usbipd list` 显示 `Attached` 也可能是早已失效的假象，判据只看 `/dev/ttyACM*`。
+- **视频设备按后端看**。日志打「相机后端：wsl」时列出的是 `DirectShow 视频设备`，
+  此时 **V4L2 采集节点为空属于正常**：相机留在 Windows 侧供 `ffmpeg.exe` 采，
+  不要为"补齐"去 `usbipd attach` 它。转发 UVC 会掉到 5 fps，且 `bind` 之后
+  Windows 侧 DirectShow 失去设备，采集在枚举阶段就退出。只有「相机后端：linux」
+  才该看到 V4L2 节点。
+
+确认无误后再运行：
 
 ```bash
 python3.10 capture/collect_cap.py --cap-side right --pose-source controller --pose-side right

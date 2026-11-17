@@ -33,6 +33,35 @@
 
 ## 二、环境
 
+### `usbipd attach` 报 `already attached to a client`，WSL 里却没有 `/dev/ttyACM*`
+
+**现象**：`usbipd list` 手套那行是 `Attached`，`ls /dev/ttyACM*` 为空；再 `attach`
+被直接拒绝：
+
+```text
+usbipd: info: Device with hardware-id '28e9:018a' found at busid '3-3'.
+usbipd: error: Device with busid '3-3' is already attached to a client.
+```
+
+**根因**：WSL 空闲约 60 s 会自动关机（`vmIdleTimeout` 默认值），USB/IP 会话随之
+断开，但 usbipd 的状态列不跟着更新。设备侧还记着那个已经死掉的客户端，于是
+attach 被当成重复操作拒掉。
+
+**对策**：
+
+```powershell
+usbipd detach --busid <BUSID>
+usbipd attach --wsl --busid <BUSID>
+```
+
+`detach` 会让设备重新枚举，紧跟的 `attach` 常报 `There is no device with busid`，
+等 1~2 秒重试同一条命令，别改参数。仍然拒绝就 `wsl --shutdown` 关掉全部实例再挂
+——注意它会杀掉 WSL 里所有正在跑的任务。
+
+**判据**：只看 `/dev/ttyACM*` 在不在。`usbipd list` 的 `Attached` 不能当证据。
+`scripts/run_capture_noquest.sh` 已内置这套 detach→attach 重试（最多 5 轮），
+手工跑就得自己来。
+
 ### `cv2.namedWindow` 报 "The function is not implemented"
 
 **根因**：装的是 `opencv-python-headless`。它和 `opencv-python` 装在同一环境时，

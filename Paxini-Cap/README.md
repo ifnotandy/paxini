@@ -133,19 +133,34 @@ python3.10 selftest/selftest.py          # 应为 107 项全过
 
 ## 2. 硬件接入
 
+**只有手套进 WSL，相机全程留在 Windows。** 相机走 USB/IP 转发会丢等时包，
+720p 从 30 fps 掉到 5 fps（§0.1 第 8 条）；更糟的是 `bind` 会把 UVC 驱动换成
+usbipd 的 stub，Windows 侧 DirectShow 立刻失去这两路设备，`camera_backend: wsl`
+的采集在枚举阶段就起不来。
+
 ```powershell
 usbipd list
-usbipd attach --wsl --hardware-id 28e9:018a          # 手套 PXCap III
-usbipd attach --wsl --busid <BUSID>                   # 相机 1（首次要 bind）
-usbipd attach --wsl --busid <BUSID>                   # 相机 2
+usbipd bind   --busid <手套的 BUSID>              # 仅首次，之后一直有效
+usbipd attach --wsl --busid <手套的 BUSID>        # WSL 每次重启后都要重来
+# 相机不要 bind，也不要 attach
 ```
 
-- 手套串口按 **USB VID:PID `28e9:018a`** 识别，不依赖 `/dev/ttyACM0` 编号
+- 手套按 **USB VID:PID `28e9:018a`** 识别，不依赖 `/dev/ttyACM0` 编号
   （重插会变）。程序同时扫 `ttyACM*`、`ttyUSB*` 和 `/dev/serial/by-id`。
-- 相机按 `/sys/class/video4linux/video*` 的 `index == 0` 节点发现（UVC 还会
-  多一个 metadata 节点），按 `device` 的 realpath 去重、排序后映射 cam0/cam1。
-- 两路 UVC 同时走 usbipd 是同步传输，720p30 两路约 20 MB/s，是整条链路最容易
-  出问题的地方：先用 `--camera-fps 15` 或 640x480 验证。
+- `usbipd list` 显示 `Attached` **不代表** WSL 里还能用：WSL 空闲约 60 s 自动关机，
+  USB/IP 会话随之断开而状态列不更新。判据只看 `ls /dev/ttyACM*`。
+- 节点为空时再 `attach` 会被直接拒绝：`Device with busid '3-3' is already attached
+  to a client`。**先 `usbipd detach --busid <BUSID>`，再 `attach`**，重复 attach 无效。
+  `detach` 后设备会重新枚举，紧接着的 `attach` 常报 `There is no device with
+  busid`，等 1~2 秒重试同一条命令即可。
+- 反复报 `already attached` 说明它还挂在另一个活着的 WSL 会话上：`wsl --shutdown`
+  关掉全部实例后重新 `attach`。这会杀掉 WSL 里所有正在跑的任务。
+- 相机的发现方式按后端分：`wsl` 后端从 Windows 侧枚举 DirectShow 名字，
+  V4L2 节点为空是正常的；`linux` 后端（原生 Ubuntu，相机直接插本机）才按
+  `/sys/class/video4linux/video*` 的 `index == 0` 节点发现（UVC 还会多一个
+  metadata 节点），按 `device` 的 realpath 去重、排序后映射 cam0/cam1。
+- 原生 Ubuntu 上两路 UVC 同时采 720p30 约 20 MB/s，是整条链路最容易出问题的地方：
+  先用 `--camera-fps 15` 或 640x480 验证。
 
 ## 3. 安装（只做一次）
 
