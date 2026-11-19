@@ -6,8 +6,26 @@
 # ---------- 采集数据 / 录像（体积极大，仅保留本地）----------
 厂商数据采集/
 **/recordings/
+**/clock_probe/
 *.mkv
 *.mp4
+*.avi
+*.mov
+*.h5
+*.hdf5
+*.bag
+*.bag.active
+*.mcap
+
+# ---------- 压缩包 / 大型办公文件（默认仅保留本地）----------
+**/*.xls
+**/*.doc
+**/*.docx
+**/*.ppt
+**/*.pptx
+**/*.zip
+**/*.7z
+**/*.rar
 
 # ---------- 厂商安装包与二进制（改放 GitHub Release）----------
 *.deb
@@ -35,6 +53,10 @@ __pycache__/
 *.py[cod]
 .venv/
 venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
 
 # ---------- 本地设备配置 / 密钥 ----------
 **/.quest_ip

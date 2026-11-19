@@ -28,6 +28,7 @@ import tempfile
 import threading
 import time
 import types
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -36,7 +37,7 @@ import numpy as np
 
 # 自检单独成目录，被测模块分散在 ../capture 与 ../viewer，显式补上搜索路径。
 _QUEST_ROOT = Path(__file__).resolve().parent.parent
-for _sub in ("capture", "viewer"):
+for _sub in ("capture", "viewer", "diagnostics"):
     _module_dir = _QUEST_ROOT / _sub
     if str(_module_dir) not in sys.path:
         sys.path.insert(0, str(_module_dir))
@@ -54,9 +55,19 @@ from collect_cap import (
     load_config_file,
     pump_and_record,
     quest_sample_to_row,
+    resolve_pose_side,
     snapshot_cap_frame,
+    write_startup_failure,
 )
 from quest3 import XrtReader
+from quest_clock_probe import evaluate_clock_samples
+from quest_view import (
+    QUEST_ALIGNED_NOTE,
+    QUEST_ALIGNMENT_NOTE,
+    QUEST_ALIGNMENT_SDK_UNIX,
+    load_clock_report,
+    load_quest_view,
+)
 from visualize import (
     build_preview,
     camera_tracks,
@@ -982,6 +993,112 @@ def test_config_file(tmp_root: Path) -> None:
         check(f"配置/{label}报错", raised)
 
 
+def test_pose_side_selection(tmp_root: Path) -> None:
+    """One glove side selects Quest by default; explicit side still wins."""
+    parser = build_parser()
+    check(
+        "手别/默认自动跟随",
+        parser.parse_args([]).pose_side == "auto",
+        parser.parse_args([]).pose_side,
+    )
+    check(
+        "手别/auto 跟随左手",
+        resolve_pose_side("left", "auto") == "left",
+    )
+    check(
+        "手别/auto 跟随右手",
+        resolve_pose_side("right", "auto") == "right",
+    )
+    check(
+        "手别/显式覆盖",
+        resolve_pose_side("left", "right") == "right",
+    )
+
+    path = tmp_root / "side.yaml"
+    path.write_text(
+        "cap_side: left\npose_side: auto\n",
+        encoding="utf-8",
+    )
+    config_parser = build_parser()
+    apply_config(config_parser, load_config_file(path), path)
+    configured = config_parser.parse_args([])
+    check(
+        "手别/配置左手自动跟随",
+        configured.cap_side == "left"
+        and configured.pose_side == "auto"
+        and resolve_pose_side(configured.cap_side, configured.pose_side)
+        == "left",
+        f"{configured.cap_side} {configured.pose_side}",
+    )
+
+    overridden = config_parser.parse_args(
+        ["--cap-side", "right", "--pose-side", "left"]
+    )
+    check(
+        "手别/命令行独立覆盖",
+        overridden.cap_side == "right" and overridden.pose_side == "left",
+        f"{overridden.cap_side} {overridden.pose_side}",
+    )
+
+
+def test_startup_failure(tmp_root: Path) -> None:
+    """Failed startup keeps diagnostics without creating a misleading HDF5."""
+    from camera_ffmpeg import FfmpegCamera
+
+    output_dir = tmp_root / "startup_failure"
+    camera_dir = output_dir / "cameras"
+    camera = FfmpegCamera(
+        "left_cam0",
+        "/dev/video4",
+        camera_dir,
+        640,
+        480,
+        15.0,
+        "copy",
+        "/usr/bin/ffmpeg",
+        backend="linux",
+    )
+    camera_dir.mkdir(parents=True)
+    camera.log_path.write_text(
+        "Could not open video device\nNo frames received\n",
+        encoding="utf-8",
+    )
+    failure = write_startup_failure(
+        output_dir,
+        RuntimeError("等待摄像头画面超时"),
+        started_at=datetime.now().astimezone(),
+        cap_side="left",
+        pose_source="controller",
+        pose_side="left",
+        pose_side_requested="auto",
+        hand_port="/dev/ttyACM0",
+        camera_devices={"cam0": "/dev/video4"},
+        cameras=[camera],
+        ffmpeg="/usr/bin/ffmpeg",
+    )
+    payload = json.loads(failure.read_text(encoding="utf-8"))
+    camera_payload = payload["cameras"]["left_cam0"]
+    check(
+        "启动失败/明确标记状态",
+        payload["status"] == "startup_failed"
+        and payload["hand_port"] == "/dev/ttyACM0"
+        and payload["cap_side"] == "left"
+        and payload["pose"]["side"] == "left"
+        and payload["pose"]["side_requested"] == "auto",
+        str(payload),
+    )
+    check(
+        "启动失败/不伪造 data.h5",
+        not (output_dir / "data.h5").exists(),
+    )
+    check(
+        "启动失败/保留命令和日志",
+        "v4l2" in (camera_payload["command"] or [])
+        and "No frames received" in camera_payload["log_tail"],
+        str(camera_payload),
+    )
+
+
 def test_camera_backend(tmp_root: Path) -> None:
     """The two camera backends must produce different, correct commands."""
     from unittest import mock
@@ -1007,6 +1124,22 @@ def test_camera_backend(tmp_root: Path) -> None:
         and "/dev/video0" in linux_cmd
         and not any("dshow" in part for part in linux_cmd),
         " ".join(linux_cmd[:6]),
+    )
+    linux_cam.progress_path.parent.mkdir(parents=True, exist_ok=True)
+    linux_cam.progress_path.write_text(
+        "total_size=262144\nout_time_us=1000000\nprogress=continue\n",
+        encoding="utf-8",
+    )
+    progress_without_frame = linux_cam.progress_signal()
+    linux_cam.progress_path.write_text(
+        "frame=7\ntotal_size=524288\nout_time_us=2000000\nprogress=continue\n",
+        encoding="utf-8",
+    )
+    check(
+        "相机后端/stream-copy 无 frame 时按出流时间判进度",
+        progress_without_frame == 30
+        and linux_cam.progress_signal() == 7,
+        f"fallback={progress_without_frame} frame={linux_cam.progress_signal()}",
     )
 
     with mock.patch(
@@ -1280,6 +1413,194 @@ def test_visualize(tmp_root: Path) -> None:
     check("可视化/载荷含四路关节角标签", len(payload["cap"]["angle_labels"]) == 4)
 
 
+def test_quest_view(tmp_root: Path) -> None:
+    """Quest payload keeps its SDK axis and never invents source alignment."""
+    path = tmp_root / "quest_view.h5"
+    rows = 20
+    stamps = 1_700_000_000_000_000_000 + np.arange(rows) * 8_333_333
+    stamps[3] = -1
+    xyz = np.column_stack([
+        np.arange(rows) * 0.01,
+        np.ones(rows) * 1.2,
+        -np.arange(rows) * 0.02,
+    ])
+    pose = np.column_stack([xyz, np.tile([0.0, 0.0, 0.0, 1.0], (rows, 1))])
+    with h5py.File(path, "w") as handle:
+        quest = handle.create_group("quest")
+        quest["sdk_timestamp_ns"] = stamps
+        quest["body_timestamp_ns"] = np.full(rows, -1, dtype=np.int64)
+        quest["motion_timestamp_ns"] = np.full(rows, -1, dtype=np.int64)
+        quest["body_joints_timestamp_ns"] = np.full((rows, 24), -1, dtype=np.int64)
+        quest["sequence"] = np.arange(20, 20 + rows, dtype=np.int32)
+        quest["pose_6d"] = pose
+        quest["tracked"] = np.ones(rows, dtype=bool)
+        quest["tracked"][2] = False
+        quest["head/pose_xyzw"] = pose
+        quest["head/tracked"] = np.ones(rows, dtype=bool)
+        quest["head/available"] = np.ones(rows, dtype=bool)
+        for side in ("left", "right"):
+            quest[f"controller_{side}/pose_xyzw"] = pose
+            quest[f"controller_{side}/grip"] = np.linspace(0, 1, rows)
+            quest[f"controller_{side}/trigger"] = np.zeros(rows)
+            quest[f"controller_{side}/axis"] = np.zeros((rows, 2))
+            quest[f"hand_{side}/joint_count"] = np.full(rows, 26, dtype=np.int32)
+        for name in ("A", "B", "X", "Y", "left_menu", "right_menu",
+                     "left_axis_click", "right_axis_click"):
+            quest[f"buttons/{name}"] = np.zeros(rows, dtype=bool)
+
+        with h5py.File(path, "r") as opened:
+            payload = load_quest_view(
+                opened,
+                100,
+                pose_source="controller",
+                pose_side="left",
+            )
+
+    check(
+        "Quest 可视化/独立时间轴且明确未对齐",
+        payload is not None
+        and payload["time_source"] == "sdk_timestamp_ns"
+        and payload["alignment"] == "none"
+        and payload["alignment_note"] == QUEST_ALIGNMENT_NOTE,
+        str(payload and payload["alignment"]),
+    )
+    check(
+        "Quest 可视化/缺失时间戳保留断点",
+        payload is not None
+        and payload["time"][3] is None
+        and payload["quality"]["sdk_missing_timestamps"] == 1,
+        str(payload and payload["time"]),
+    )
+    check(
+        "Quest 可视化/主位姿与手柄位置",
+        payload is not None
+        and payload["main_pose"]["xyz"][0] == [0.0, 1.2, 0.0]
+        and payload["controllers"]["left"]["axis"][0] == [0.0, 0.0]
+        and payload["hand_joint_counts"]["right"][0] == 26,
+    )
+
+    fallback_path = tmp_root / "quest_view_no_stamp.h5"
+    with h5py.File(path, "r") as source, h5py.File(fallback_path, "w") as target:
+        source.copy("quest", target)
+        del target["quest/sdk_timestamp_ns"]
+        target["quest/sdk_timestamp_ns"] = np.full(rows, -1, dtype=np.int64)
+    with h5py.File(fallback_path, "r") as opened:
+        fallback = load_quest_view(opened, 100)
+    check(
+        "Quest 可视化/SDK 时间缺失时降级为 sequence",
+        fallback is not None
+        and fallback["time_source"] == "sequence"
+        and fallback["time_label"] == "轮询序号"
+        and fallback["time"][1] == 1,
+        str(fallback and fallback["time"]),
+    )
+
+    report_path = tmp_root / "clock_report.json"
+    base_ns = int(stamps[0])
+    report = {
+        "schema_version": 1,
+        "kind": "quest_clock_probe",
+        "clock_domain": "unix_epoch",
+        "passed": True,
+        "models": {
+            "host_unix": {
+                "reference_host_ns": base_ns,
+                "reference_sdk_ns": base_ns,
+                "sdk_per_host_slope": 1.0,
+                "intercept_s": 0.0,
+            }
+        },
+    }
+    report_path.write_text(json.dumps(report), encoding="utf-8")
+    check(
+        "Quest 可视化/只有通过的 C8 报告可用于 sdk_unix",
+        load_clock_report(report_path)["passed"] is True,
+    )
+    with h5py.File(path, "r") as opened:
+        aligned = load_quest_view(
+            opened,
+            100,
+            alignment=QUEST_ALIGNMENT_SDK_UNIX,
+            cap_unix_ns=base_ns,
+            clock_report=report,
+        )
+    check(
+        "Quest 可视化/sdk_unix 使用手套 Unix 相对秒",
+        aligned is not None
+        and aligned["alignment"] == QUEST_ALIGNMENT_SDK_UNIX
+        and aligned["time_unit"] == "s"
+        and aligned["alignment_note"] == QUEST_ALIGNED_NOTE
+        and aligned["time"][0] == 0.0
+        and aligned["time"][3] is None,
+        str(aligned and aligned["time"]),
+    )
+
+    rejected = dict(report)
+    rejected["passed"] = False
+    report_path.write_text(json.dumps(rejected), encoding="utf-8")
+    raised = False
+    try:
+        load_clock_report(report_path)
+    except ValueError:
+        raised = True
+    check("Quest 可视化/拒绝未通过的 C8 报告", raised)
+
+    file_rejected = False
+    try:
+        with h5py.File(fallback_path, "r") as opened:
+            load_quest_view(
+                opened,
+                100,
+                alignment=QUEST_ALIGNMENT_SDK_UNIX,
+                cap_unix_ns=base_ns,
+                clock_report=report,
+            )
+    except ValueError as exc:
+        file_rejected = "data.h5 不满足" in str(exc)
+    check("Quest 可视化/当前文件时间戳不合格时拒绝对齐", file_rejected)
+
+
+def test_clock_probe_report() -> None:
+    rows = []
+    host0 = 1_700_000_000_000_000_000
+    for index in range(240):
+        host = host0 + index * 8_333_333
+        rows.append(
+            {
+                "host_unix_mid_ns": host,
+                "host_monotonic_mid_ns": 5_000_000_000 + index * 8_333_333,
+                "sdk_timestamp_ns": host + 2_000_000,
+            }
+        )
+    passed = evaluate_clock_samples(rows, target_duration_s=2.0)
+    check(
+        "C8 探针/稳定 Unix 时钟通过",
+        passed["passed"] is True
+        and passed["clock_domain"] == "unix_epoch"
+        and passed["alignment"]["recommended"] == "sdk_unix",
+        str(passed),
+    )
+
+    frozen = [dict(row) for row in rows]
+    frozen_sdk = int(frozen[10]["sdk_timestamp_ns"])
+    for index in range(10, 40):
+        frozen[index]["sdk_timestamp_ns"] = frozen_sdk
+    failed = evaluate_clock_samples(frozen, target_duration_s=2.0)
+    check(
+        "C8 探针/长时间时间戳冻结被拒绝",
+        failed["passed"] is False
+        and any("连续重复" in reason for reason in failed["failures"]),
+        str(failed["failures"]),
+    )
+    short = evaluate_clock_samples(rows[:50], target_duration_s=2.0)
+    check(
+        "C8 探针/提前中断不能通过",
+        short["passed"] is False
+        and any("有效时长" in reason for reason in short["failures"]),
+        str(short["failures"]),
+    )
+
+
 def run_case(name: str, function: Any, *args: Any) -> None:
     """Run one test group; an unexpected exception is a failure, not a crash.
 
@@ -1307,12 +1628,16 @@ def main() -> int:
         run_case("实时视图", test_live_view_hook)
         run_case("相机单调钟", test_camera_monotonic, tmp_root)
         run_case("配置", test_config_file, tmp_root)
+        run_case("手别选择", test_pose_side_selection, tmp_root)
+        run_case("启动失败工件", test_startup_failure, tmp_root)
         if shutil.which("ffprobe"):
             run_case("相机后端", test_camera_backend, tmp_root)
             run_case("相机预览", test_camera_preview, tmp_root)
         else:
             skip("相机后端 / 相机预览", "本机找不到 ffprobe（这两组验的是 ffmpeg 命令拼装，需要在装好 ffmpeg+ffprobe 的环境跑）")
         run_case("可视化", test_visualize, tmp_root)
+        run_case("Quest 可视化", test_quest_view, tmp_root)
+        run_case("C8 时钟探针", test_clock_probe_report)
         run_case("可视化视频", test_visualize_video, tmp_root)
         run_case("杂项", test_misc)
     finally:

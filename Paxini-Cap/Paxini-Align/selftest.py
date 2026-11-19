@@ -99,6 +99,104 @@ def make_recording(
     return rec
 
 
+def add_quest(
+    rec: Path,
+    *,
+    t0_ns: int = 1_700_000_000_000_000_000,
+    rate: float = 120.0,
+    start_s: float = 0.0,
+    seconds: float = 4.5,
+) -> None:
+    rows = int(seconds * rate)
+    dt = int(1e9 / rate)
+    sdk = t0_ns + int(start_s * 1e9) + np.arange(rows, dtype=np.int64) * dt
+    sequence = np.arange(100, 100 + rows, dtype=np.int32)
+    pose = np.zeros((rows, 7), dtype=np.float64)
+    pose[:, 0] = (sdk - t0_ns) / 1e9
+    pose[:, 1] = 1.0
+    pose[:, 2] = -0.5
+    pose[:, 6] = 1.0
+    with h5py.File(rec / "data.h5", "r+") as f:
+        quest = f.create_group("quest")
+        quest.create_dataset("sdk_timestamp_ns", data=sdk)
+        quest.create_dataset("body_timestamp_ns", data=np.full(rows, -1, dtype=np.int64))
+        quest.create_dataset("motion_timestamp_ns", data=np.full(rows, -1, dtype=np.int64))
+        quest.create_dataset(
+            "body_joints_timestamp_ns",
+            data=np.full((rows, 24), -1, dtype=np.int64),
+        )
+        quest.create_dataset("sequence", data=sequence)
+        quest.create_dataset("pose_6d", data=pose)
+        quest.create_dataset("tracked", data=np.ones(rows, dtype=bool))
+        head = quest.create_group("head")
+        head.create_dataset("pose_xyzw", data=pose)
+        head.create_dataset("tracked", data=np.ones(rows, dtype=bool))
+        head.create_dataset("available", data=np.ones(rows, dtype=bool))
+        for side in ("left", "right"):
+            controller = quest.create_group(f"controller_{side}")
+            controller.create_dataset("pose_xyzw", data=pose)
+            controller.create_dataset("grip", data=np.linspace(0, 1, rows))
+            controller.create_dataset("trigger", data=np.zeros(rows))
+            controller.create_dataset("axis", data=np.zeros((rows, 2)))
+            hand = quest.create_group(f"hand_{side}")
+            joints = np.zeros((rows, 26, 7), dtype=np.float64)
+            joints[..., 6] = 1.0
+            hand.create_dataset("joints_pose_xyzw", data=joints)
+            hand.create_dataset("joint_count", data=np.full(rows, 26, dtype=np.int32))
+        buttons = quest.create_group("buttons")
+        for name in (
+            "A", "B", "X", "Y", "left_menu", "right_menu",
+            "left_axis_click", "right_axis_click",
+        ):
+            buttons.create_dataset(name, data=np.zeros(rows, dtype=bool))
+
+
+def make_clock_report(
+    rec: Path,
+    *,
+    passed: bool = True,
+    t0_ns: int = 1_700_000_000_000_000_000,
+) -> tuple[dict, str]:
+    payload = {
+        "schema_version": 1,
+        "kind": "quest_clock_probe",
+        "started_at": "2026-11-18T16:00:00+08:00",
+        "ended_at": "2026-11-18T16:01:00+08:00",
+        "target_duration_s": 60.0,
+        "sample_count": 7200,
+        "clock_domain": "unix_epoch",
+        "passed": passed,
+        "failures": [],
+        "thresholds": {
+            "min_valid_fraction": 0.95,
+            "min_duration_fraction": 0.95,
+            "max_backwards_steps": 0,
+            "max_same_timestamp_run": 10,
+            "max_residual_median_ms": 10.0,
+            "max_residual_p99_ms": 30.0,
+            "max_slope_error_ppm": 100.0,
+        },
+        "models": {
+            "host_unix": {
+                "reference_host_ns": t0_ns,
+                "reference_sdk_ns": t0_ns,
+                "sdk_per_host_slope": 1.0,
+                "intercept_s": 0.0,
+            }
+        },
+        "alignment": {
+            "recommended": "sdk_unix" if passed else "none",
+            "target_clock": "cap/timestamp_unix_ns" if passed else None,
+        },
+    }
+    path = rec / "clock_report.json"
+    path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return ac.load_quest_clock_report(path)
+
+
 def run(rec: Path, **kwargs) -> dict:
     defaults = dict(reference=None, timebase="auto", delay_ms=0.0, omit_distribution=False,
                     interpolate_distribution=True, keep_outside=False)
@@ -188,6 +286,262 @@ def test_multi_camera_views(tmp: Path) -> None:
     dt = np.abs(views["right_cam1"]["dt_ms"]) if ok else np.array([999.0])
     check("两路相机各自给出最近帧号（cam1 误差 ≤ 半帧）",
           ok and float(dt.max()) <= 16.7 + 0.1, f"cam1 最大偏差 {float(dt.max()):.2f} ms")
+
+
+def test_quest_causal_pairing(tmp: Path) -> None:
+    rec = make_recording(tmp)
+    add_quest(rec, start_s=0.025)
+    report, digest = make_clock_report(rec)
+    result = run(
+        rec,
+        quest_alignment=ac.QUEST_ALIGNMENT_SDK_UNIX,
+        quest_clock_report=report,
+        quest_report_sha256=digest,
+    )
+    quest = result["quest"]
+    with h5py.File(rec / "data.h5") as f:
+        sdk = f["quest/sdk_timestamp_ns"][:].astype(np.int64)
+        frame_indices = np.asarray(
+            result["views"][result["reference"]]["frame_index"],
+            dtype=np.int64,
+        )
+        cam_unix = f[f"cameras/{result['reference']}/timestamp_unix_ns"][
+            frame_indices
+        ].astype(np.int64)
+    targets = cam_unix - int(round(result["delay_ms"] * 1e6))
+    mapped = ac.sdk_unix_to_host_unix_ns(
+        sdk,
+        report["models"]["host_unix"],
+    )
+    expected = np.searchsorted(mapped, targets, side="right") - 1
+    selected = np.asarray(quest["index"], dtype=np.int64)
+    causal = bool(np.all(mapped[selected] <= targets))
+    check(
+        "Quest 取目标时刻之前最近样本，不使用未来样本",
+        bool(np.array_equal(selected, expected)) and causal
+        and bool(np.all(quest["valid"])),
+        f"最大年龄 {quest['age_stats_ms']['max']:.3f} ms",
+    )
+
+
+def test_quest_duplicate_tie_break(tmp: Path) -> None:
+    rec = make_recording(tmp)
+    add_quest(rec, start_s=0.025)
+    report, digest = make_clock_report(rec)
+    with h5py.File(rec / "data.h5", "r+") as f:
+        sdk = f["quest/sdk_timestamp_ns"][:]
+        sdk[5] = sdk[4]
+        f["quest/sdk_timestamp_ns"][:] = sdk
+    with h5py.File(rec / "data.h5") as f:
+        sdk = f["quest/sdk_timestamp_ns"][:].astype(np.int64)
+        target = int(
+            ac.sdk_unix_to_host_unix_ns(
+                sdk[5:6],
+                report["models"]["host_unix"],
+            )[0]
+        ) + 1_000_000
+        paired = ac.align_quest_to_targets(
+            f,
+            np.asarray([target], dtype=np.int64),
+            report,
+            digest,
+            25.0,
+        )
+    check(
+        "同一时间戳重复时，因果配对取源文件中最后一行",
+        int(paired["index"][0]) == 5 and bool(paired["valid"][0]),
+        f"选中行 {int(paired['index'][0])}",
+    )
+
+
+def test_quest_clock_model_inverse(tmp: Path) -> None:
+    del tmp
+    t0 = 1_700_000_000_000_000_000
+    host = t0 + np.arange(8, dtype=np.int64) * 250_000_000
+    model = {
+        "reference_host_ns": t0,
+        "reference_sdk_ns": t0,
+        "sdk_per_host_slope": 1.0001,
+        "intercept_s": 0.003,
+    }
+    relative_s = (host - t0) / 1e9
+    sdk = t0 + np.rint(
+        (relative_s * model["sdk_per_host_slope"] + model["intercept_s"])
+        * 1e9
+    ).astype(np.int64)
+    recovered = ac.sdk_unix_to_host_unix_ns(sdk, model)
+    error_ns = int(np.max(np.abs(recovered - host)))
+    check(
+        "Quest C8 时钟模型按斜率与截距反向换算",
+        error_ns <= 1_000,
+        f"最大误差 {error_ns} ns",
+    )
+
+
+def test_quest_missing_semantics(tmp: Path) -> None:
+    rec = make_recording(tmp)
+    add_quest(rec, start_s=0.1)
+    report, digest = make_clock_report(rec)
+    result = run(
+        rec,
+        quest_alignment=ac.QUEST_ALIGNMENT_SDK_UNIX,
+        quest_clock_report=report,
+        quest_report_sha256=digest,
+    )
+    path = ac.write_aligned(result, tmp / "out")
+    with h5py.File(path) as f:
+        first_invalid = int(np.flatnonzero(~f["quest/valid"][:])[0])
+        pose = f["quest/data/pose_6d"][first_invalid]
+        body_stamp = int(f["quest/data/body_timestamp_ns"][first_invalid])
+        tracked = bool(f["quest/data/tracked"][first_invalid])
+        top_stamp = int(f["quest/timestamp_sdk_ns"][first_invalid])
+        top_index = int(f["quest/index"][first_invalid])
+    check(
+        "Quest 缺失行保留相机轴，并按 float/bool/int 语义写 NaN/False/-1",
+        first_invalid >= 0 and np.all(np.isnan(pose)) and not tracked
+        and body_stamp == -1 and top_stamp == -1 and top_index == -1,
+        f"首行无效位置 {first_invalid}",
+    )
+
+
+def test_quest_full_group_written(tmp: Path) -> None:
+    rec = make_recording(tmp)
+    add_quest(rec, start_s=0.025)
+    report, digest = make_clock_report(rec)
+    result = run(
+        rec,
+        quest_alignment=ac.QUEST_ALIGNMENT_SDK_UNIX,
+        quest_clock_report=report,
+        quest_report_sha256=digest,
+    )
+    path = ac.write_aligned(result, tmp / "out")
+    with h5py.File(path) as f:
+        rows = int(f["timestamp_ns"].shape[0])
+        format_version = int(f.attrs["format_version"])
+        summary = json.loads(f.attrs["summary"])
+        ok = (
+            format_version == 2
+            and "quest/data/pose_6d" in f
+            and "quest/data/controller_left/grip" in f
+            and "quest/data/hand_right/joints_pose_xyzw" in f
+            and "quest/data/buttons/A" in f
+            and f["quest/data/pose_6d"].shape == (rows, 7)
+            and f["quest/data/hand_right/joints_pose_xyzw"].shape == (rows, 26, 7)
+            and summary["quest"]["paired_rows"] == rows
+            and summary["quest"]["clock_report_sha256"] == digest
+        )
+    check("完整 Quest 组写入 v2 对齐文件并记录 C8 报告摘要", ok, f"{rows} 行")
+
+
+def test_quest_file_quality_gate(tmp: Path) -> None:
+    rec = make_recording(tmp)
+    add_quest(rec, start_s=0.025)
+    report, digest = make_clock_report(rec)
+    with h5py.File(rec / "data.h5", "r+") as f:
+        raw = f["quest/sdk_timestamp_ns"][:]
+        raw[-max(10, raw.size // 5):] = 0
+        f["quest/sdk_timestamp_ns"][:] = raw
+    try:
+        run(
+            rec,
+            quest_alignment=ac.QUEST_ALIGNMENT_SDK_UNIX,
+            quest_clock_report=report,
+            quest_report_sha256=digest,
+        )
+    except ac.AlignError as exc:
+        check(
+            "当前文件时间戳质量不达 C8 门槛时硬失败",
+            "不满足 C8 对齐条件" in str(exc),
+            str(exc)[:60],
+        )
+    else:
+        check("当前文件时间戳质量不达 C8 门槛时硬失败", False, "没有抛错")
+
+
+def test_quest_coverage_gate(tmp: Path) -> None:
+    rec = make_recording(tmp)
+    add_quest(rec, start_s=0.025, seconds=2.0)
+    report, digest = make_clock_report(rec)
+    result = run(
+        rec,
+        quest_alignment=ac.QUEST_ALIGNMENT_SDK_UNIX,
+        quest_clock_report=report,
+        quest_report_sha256=digest,
+    )
+    problems = ac.gates(result)
+    fraction = float(result["quest"]["valid_fraction"])
+    check(
+        "Quest 有效配对不足 95% 时进入 strict 失败判据",
+        any("Quest 有效配对" in item for item in problems),
+        f"有效 {fraction:.1%}",
+    )
+
+
+def test_quest_requires_report(tmp: Path) -> None:
+    rec = make_recording(tmp)
+    add_quest(rec, start_s=0.025)
+    try:
+        run(rec, quest_alignment=ac.QUEST_ALIGNMENT_SDK_UNIX)
+    except ac.AlignError as exc:
+        check("Quest 对齐缺少通过报告时拒绝执行", "C8" in str(exc), str(exc))
+    else:
+        check("Quest 对齐缺少通过报告时拒绝执行", False, "没有抛错")
+
+
+def test_quest_cli_roundtrip(tmp: Path) -> None:
+    rec = make_recording(tmp)
+    add_quest(rec, start_s=0.025)
+    make_clock_report(rec)
+    out = tmp / "cli_out"
+    code = ac.main(
+        [
+            str(rec),
+            "--output",
+            str(out),
+            "--delay-ms",
+            "0",
+            "--quest-align",
+            "sdk_unix",
+            "--quest-clock-report",
+            str(rec / "clock_report.json"),
+            "--strict",
+        ]
+    )
+    path = out / "aligned_right_cam0.h5"
+    ok = code == 0 and path.is_file()
+    if path.is_file():
+        with h5py.File(path) as f:
+            ok = ok and int(f.attrs.get("format_version", 0)) == 2 and "quest/data" in f
+    check("Quest CLI 用通过报告生成 v2 对齐文件", ok, f"exit={code}")
+
+
+def test_quest_hard_gate_exit_code(tmp: Path) -> None:
+    rec = make_recording(tmp)
+    add_quest(rec, start_s=0.025)
+    make_clock_report(rec)
+    with h5py.File(rec / "data.h5", "r+") as f:
+        raw = f["quest/sdk_timestamp_ns"][:]
+        raw[-max(10, raw.size // 5):] = 0
+        f["quest/sdk_timestamp_ns"][:] = raw
+    out = tmp / "must_not_exist"
+    code = ac.main(
+        [
+            str(rec),
+            "--output",
+            str(out),
+            "--delay-ms",
+            "0",
+            "--quest-align",
+            "sdk_unix",
+            "--quest-clock-report",
+            str(rec / "clock_report.json"),
+        ]
+    )
+    check(
+        "Quest C8 硬门控失败始终非 0 退出且不写文件",
+        code != 0 and not out.exists(),
+        f"exit={code}",
+    )
 
 
 def test_write_and_reopen(tmp: Path) -> None:
@@ -281,6 +635,12 @@ def main() -> int:
             test_nearest_integer, test_counts_nearest, test_omit_distribution,
             test_timebase_fallback, test_multi_camera_views, test_write_and_reopen,
             test_gates_pass, test_rejects_unsorted, test_write_flag_repair, test_lookup3_vector,
+            test_quest_causal_pairing, test_quest_duplicate_tie_break,
+            test_quest_clock_model_inverse,
+            test_quest_missing_semantics, test_quest_full_group_written,
+            test_quest_file_quality_gate, test_quest_coverage_gate,
+            test_quest_requires_report, test_quest_cli_roundtrip,
+            test_quest_hard_gate_exit_code,
         ]
         for index, test in enumerate(tests):
             work = root / f"case{index:02d}"

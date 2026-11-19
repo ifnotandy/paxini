@@ -3,8 +3,8 @@
 
 Reads ``<capture>/data.h5`` and shows joint angles, resultant-force magnitude,
 distribution-force point counts, and the per-slot resultant force (x, y, z) as
-a plain numeric table, on one scrubbable time axis.  The Quest rows are summarised in the window header
-and exported in full by ``--html``.
+a plain numeric table, on one scrubbable time axis. Optional Quest 3 data is
+rendered in a separate panel with its own SDK time axis.
 
 Two output modes, same data model:
 
@@ -62,6 +62,13 @@ if str(_CAPTURE_DIR) not in sys.path:
 # layout.  ``collect_cap`` only imports the SDK lazily, so this is safe on a
 # machine without the glove plugged in.
 from collect_cap import ANGLE_FIELDS, CAP_SLOTS
+from quest_view import (
+    QUEST_ALIGNMENT_CHOICES,
+    QUEST_ALIGNMENT_NOTE,
+    QUEST_ALIGNMENT_SDK_UNIX,
+    load_clock_report,
+    load_quest_view,
+)
 
 
 ANGLE_LABELS = {
@@ -370,53 +377,15 @@ def build_slot_force(
     }
 
 
-def load_quest(handle: h5py.File, limit: int) -> dict[str, Any] | None:
-    if "quest" not in handle or "quest/sdk_timestamp_ns" not in handle:
-        return None
-    group = handle["quest"]
-    total = int(group["sdk_timestamp_ns"].shape[0])
-    if total == 0:
-        return None
-
-    index = take_evenly(total, limit)
-    stamps: dict[str, list[Any]] = {}
-    for name in (
-        "sdk_timestamp_ns",
-        "body_timestamp_ns",
-        "motion_timestamp_ns",
-    ):
-        if f"quest/{name}" not in handle:
-            continue
-        raw = handle[f"quest/{name}"][index].astype(np.int64)
-        # -1 means "SDK did not provide it"; keep it out of the deltas.
-        delta = np.full(raw.shape, np.nan)
-        valid = raw > 0
-        if valid.sum() > 1:
-            base = raw[valid][0]
-            delta[valid] = (raw[valid] - base) / 1e6  # ms
-        stamps[name] = round_list(delta, 3)
-
-    pose: dict[str, list[Any]] = {}
-    if "quest/pose_6d" in handle:
-        block = handle["quest/pose_6d"][index].astype(np.float64)
-        for axis, column in (("x", 0), ("y", 1), ("z", 2)):
-            pose[axis] = round_list(block[:, column], 4)
-
-    tracked: list[bool] = []
-    if "quest/tracked" in handle:
-        tracked = [bool(v) for v in handle["quest/tracked"][index]]
-
-    return {
-        "rows": total,
-        "shown": int(index.size),
-        "stamps": stamps,
-        "pose": pose,
-        "tracked": tracked,
-    }
-
-
-def collect_payload(root: Path, max_points: int, dist_frames: int,
-                    with_quest: bool) -> dict[str, Any]:
+def collect_payload(
+    root: Path,
+    max_points: int,
+    dist_frames: int,
+    with_quest: bool,
+    *,
+    quest_alignment: str = "none",
+    quest_clock_report: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     h5_path = root / "data.h5"
     if not h5_path.is_file():
         raise SystemExit(f"[错误] {h5_path} 不存在")
@@ -467,13 +436,58 @@ def collect_payload(root: Path, max_points: int, dist_frames: int,
         table_seconds = seconds[table_index] if slot_force is not None else []
 
         duration = float(np.nanmax(seconds)) if seconds.size else 0.0
+        pose_meta = manifest.get("pose") or {}
+        cap_unix_first_ns = (
+            int(handle["cap/timestamp_unix_ns"][0])
+            if "cap/timestamp_unix_ns" in handle and rows
+            else 0
+        )
+        quest_payload = None
+        if with_quest:
+            quest_payload = load_quest_view(
+                handle,
+                max_points,
+                pose_source=str(pose_meta.get("source") or "controller"),
+                pose_side=str(
+                    pose_meta.get("side")
+                    or (manifest.get("hand") or {}).get("side")
+                    or "right"
+                ),
+                alignment=quest_alignment,
+                cap_unix_ns=cap_unix_first_ns,
+                clock_report=quest_clock_report,
+            )
+            if (
+                quest_payload is not None
+                and quest_payload["alignment"] != QUEST_ALIGNMENT_SDK_UNIX
+            ):
+                warnings.append(QUEST_ALIGNMENT_NOTE)
+        quest_rows = int(manifest.get("quest_rows") or 0)
+        if quest_payload is not None:
+            quest_rows = max(quest_rows, int(quest_payload["rows"]))
+
         payload: dict[str, Any] = {
             "meta": {
                 "name": root.name,
                 "path": str(root),
                 "format_version": manifest.get("format_version"),
                 "rows": rows,
-                "quest_rows": int(manifest.get("quest_rows") or 0),
+                "quest_rows": quest_rows,
+                "quest_shown": (
+                    int(quest_payload["shown"])
+                    if quest_payload is not None
+                    else 0
+                ),
+                "quest_time_source": (
+                    quest_payload["time_source"]
+                    if quest_payload is not None
+                    else None
+                ),
+                "quest_alignment": (
+                    quest_payload["alignment"]
+                    if quest_payload is not None
+                    else "none"
+                ),
                 "rate_hz": round(rate, 2),
                 "duration_s": round(duration, 3),
                 "clock": clock_source,
@@ -497,16 +511,12 @@ def collect_payload(root: Path, max_points: int, dist_frames: int,
             "slot_force": None
             if slot_force is None
             else {"t": round_list(table_seconds, 4), **slot_force},
-            "quest": load_quest(handle, max_points) if with_quest else None,
+            "quest": quest_payload,
             "video": {"cams": []},
             "warnings": warnings,
         }
 
-        glove_unix_ns = (
-            int(handle["cap/timestamp_unix_ns"][0])
-            if "cap/timestamp_unix_ns" in handle and rows
-            else 0
-        )
+        glove_unix_ns = cap_unix_first_ns
         if glove_unix_ns:
             tracks = camera_tracks(handle, root, glove_unix_ns)
             for track in tracks:
@@ -723,6 +733,41 @@ def run_window(payload: dict[str, Any], root: Path,
     ]
     angle_text = ax_text.text(0.00, total_y - 0.075, "", fontsize=7.8,
                               color="#8792a6", transform=ax_text.transAxes)
+    quest = payload.get("quest")
+    quest_aligned = (
+        bool(quest) and quest.get("alignment") == QUEST_ALIGNMENT_SDK_UNIX
+    )
+    quest_valid_times: np.ndarray | None = None
+    quest_valid_rows: np.ndarray | None = None
+    if quest_aligned and quest:
+        quest_valid_rows = np.asarray(
+            [
+                i
+                for i, value in enumerate(quest["time"])
+                if value is not None and np.isfinite(value)
+            ],
+            dtype=np.int64,
+        )
+        quest_valid_times = np.asarray(
+            [quest["time"][int(i)] for i in quest_valid_rows],
+            dtype=np.float64,
+        )
+    quest_text = ax_text.text(
+        0.00,
+        max(0.015, total_y - 0.125),
+        (
+            (
+                "Quest：已按 C8 验证的 Unix 时钟对齐"
+                if quest_aligned
+                else "Quest：独立 SDK 时间轴，未做跨源时间对齐"
+            )
+            if quest
+            else "Quest：本次没有可显示数据"
+        ),
+        fontsize=7.6,
+        color="#6de0ae" if quest_aligned else "#f0c274" if quest else "#7b879c",
+        transform=ax_text.transAxes,
+    )
 
     ax_slider = fig.add_axes([0.075, 0.042, 0.60, 0.022])
     slider = Slider(
@@ -776,6 +821,49 @@ def run_window(payload: dict[str, Any], root: Path,
                 "—" if not np.isfinite(v) else f"{v:.2f}" for v in angle_row
             ) + " deg"
         )
+        if quest:
+            qn = int(quest["shown"])
+            if (
+                quest_aligned
+                and quest_valid_times is not None
+                and quest_valid_rows is not None
+                and quest_valid_times.size
+            ):
+                target = x - t[0]
+                pos = int(np.searchsorted(
+                    quest_valid_times, target, side="right"
+                )) - 1
+                pos = max(0, min(int(quest_valid_rows.size) - 1, pos))
+                qi = int(quest_valid_rows[pos])
+            else:
+                qi = round(index / max(1, n - 1) * max(0, qn - 1))
+                qi = max(0, min(qn - 1, qi))
+            sequence = quest["sequence"][qi]
+            time_value = quest["time"][qi]
+            if time_value is None:
+                time_text = f"seq #{sequence}"
+            elif quest.get("time_unit") == "s":
+                time_text = f"{time_value:.3f} s"
+            elif quest["time_source"] == "sdk_timestamp_ns":
+                time_text = f"{time_value:.3f} ms"
+            else:
+                time_text = f"seq #{sequence}"
+            xyz = (
+                quest.get("main_pose", {}).get("xyz", [])
+                if quest.get("main_pose")
+                else []
+            )
+            row_xyz = xyz[qi] if qi < len(xyz) else []
+            if row_xyz and all(v is not None for v in row_xyz):
+                pose_text = "xyz " + " / ".join(f"{v:.3f}" for v in row_xyz)
+            else:
+                pose_text = "xyz —"
+            tracked = quest["tracked"][qi] if qi < len(quest["tracked"]) else False
+            quest_text.set_text(
+                f"Quest {qi + 1}/{qn} · {time_text} · {pose_text} · "
+                f"{'tracked' if tracked else 'untracked'} · "
+                f"{'Unix 对齐' if quest_aligned else '未跨源对齐'}"
+            )
         ax_text.set_title(
             f"当前帧 {frames[index]}   ·   {x - t[0]:.2f} s",
             fontsize=8, color="#8792a6", loc="left",
@@ -1063,6 +1151,88 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   #readout td:first-child, #readout th:first-child { text-align: left; color: var(--muted); width: 52%; }
   #readout .angles { color: var(--muted); font-size: 9px; margin-top: 2px; }
   #readout .total { color: #f0c274; font-size: 10px; margin-top: 8px; line-height: 1.5; }
+  #questCard {
+    border-color: #32435a;
+    background: linear-gradient(180deg, #151b25 0%, #111721 100%);
+    padding-left: 0;
+    padding-right: 0;
+    border-left: 0;
+    border-right: 0;
+  }
+  #questCard h2 { color: #9fc4ef; margin-left: 10px; margin-right: 10px; }
+  .quest-note {
+    padding: 8px 12px;
+    margin: 0 10px 8px;
+    border: 1px solid #76551b;
+    border-radius: 6px;
+    background: #281d0a;
+    color: #f2c46e;
+    font-weight: 600;
+    font-size: 12px;
+  }
+  .quest-note.aligned {
+    border-color: #226a52;
+    background: #0c211a;
+    color: #6de0ae;
+  }
+  .quest-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1.75fr) minmax(300px, 1fr);
+    gap: 10px;
+    min-height: 430px;
+  }
+  .quest-column {
+    display: grid;
+    gap: 10px;
+    min-width: 0;
+  }
+  .quest-panel {
+    min-width: 0;
+    min-height: 205px;
+    display: flex;
+    flex-direction: column;
+    padding: 8px;
+    border: 1px solid var(--line);
+    border-radius: 7px;
+    background: #0e131b;
+  }
+  .quest-plot-panel {
+    padding: 8px 10px 6px;
+    border: 1px solid var(--line);
+  }
+  .quest-panel h3 {
+    margin: 0 0 5px;
+    font-size: 11px;
+    color: var(--muted);
+    font-weight: 600;
+  }
+  .quest-series-legend {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    font-size: 10px;
+    color: var(--muted);
+    margin: 2px 0 3px;
+  }
+  .quest-series-legend i {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 2px;
+    margin-right: 4px;
+  }
+  #questReadout { font-size: 10.5px; line-height: 1.45; overflow: auto; }
+  #questReadout h4 {
+    margin: 7px 0 2px;
+    font-size: 10px;
+    color: #9fc4ef;
+    font-weight: 600;
+  }
+  #questReadout table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+  #questReadout td { padding: 1px 3px; white-space: nowrap; }
+  #questReadout td:first-child { color: var(--muted); width: 42%; }
+  #questReadout td:last-child { text-align: right; font-variant-numeric: tabular-nums; }
+  #questReadout .bad { color: #f0c274; }
   footer {
     position: sticky;
     bottom: 0;
@@ -1160,6 +1330,49 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     <div id="slotTable"></div>
   </section>
 </div>
+<section class="card" id="questCard" style="display:none">
+  <h2>Quest 3 <span id="questMeta"></span></h2>
+  <div class="quest-note" id="questAlignNote">Quest 使用独立 SDK 时间轴，未做跨源时间对齐</div>
+  <div class="quest-grid">
+    <div class="quest-column">
+      <div class="quest-panel quest-plot-panel">
+        <h3 id="questPosTitle">手柄位置 XYZ · m</h3>
+        <div class="quest-series-legend">
+          <span><i style="background:#ff7b72"></i>X</span>
+          <span><i style="background:#54d49f"></i>Y</span>
+          <span><i style="background:#6aa8ff"></i>Z</span>
+        </div>
+        <div class="plot" id="plotQuestPos">
+          <canvas class="base"></canvas><canvas class="over"></canvas>
+        </div>
+      </div>
+      <div class="quest-panel quest-plot-panel">
+        <h3 id="questQuatTitle">手柄姿态四元数 xyzw</h3>
+        <div class="quest-series-legend">
+          <span><i style="background:#f5a524"></i>qx</span>
+          <span><i style="background:#38d39f"></i>qy</span>
+          <span><i style="background:#4da3ff"></i>qz</span>
+          <span><i style="background:#f26d6d"></i>qw</span>
+        </div>
+        <div class="plot" id="plotQuestQuat">
+          <canvas class="base"></canvas><canvas class="over"></canvas>
+        </div>
+      </div>
+    </div>
+    <div class="quest-column">
+      <div class="quest-panel">
+        <h3 id="quest3DTitle">手柄位姿 3D 轨迹（X / Y / Z）</h3>
+        <div class="plot" id="plotQuest3D">
+          <canvas class="base"></canvas><canvas class="over"></canvas>
+        </div>
+      </div>
+      <div class="quest-panel">
+        <h3>当前 Quest 样本</h3>
+        <div id="questReadout"></div>
+      </div>
+    </div>
+  </div>
+</section>
 <div id="videoStrip"></div>
 </main>
 <footer>
@@ -1172,9 +1385,12 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 <script>
 const DATA = __PAYLOAD__;
 const CAP = DATA.cap, SLOT = DATA.slot_force, META = DATA.meta;
+const QUEST = DATA.quest;
+let questNoticeShown = false;
 const N = CAP.t.length;
 const T0 = CAP.t[0] || 0;
 const T1 = CAP.t[N - 1] || 0;
+const QN = QUEST && QUEST.time ? QUEST.time.length : 0;
 
 const state = { i: 0, playing: false, speed: 1 };
 
@@ -1504,6 +1720,443 @@ function updateClock() {
   el('seek').value = String(state.i);
 }
 
+// ---------- Quest 3 (independent SDK time axis) ----------
+const QUEST_COLORS = { x: '#ff7b72', y: '#54d49f', z: '#6aa8ff' };
+let questProjection = null;
+
+function finite(v) { return v !== null && v !== undefined && Number.isFinite(v); }
+
+function questIndex() {
+  if (!QN) return 0;
+  if (QUEST.alignment === 'sdk_unix') {
+    const target = CAP.t[state.i] - T0;
+    if (!QUEST.validRows) {
+      QUEST.validRows = [];
+      QUEST.validTimes = [];
+      for (let i = 0; i < QN; i++) {
+        if (finite(QUEST.time[i])) {
+          QUEST.validRows.push(i);
+          QUEST.validTimes.push(QUEST.time[i]);
+        }
+      }
+    }
+    if (!QUEST.validRows.length) return 0;
+    let lo = 0, hi = QUEST.validTimes.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (QUEST.validTimes[mid] <= target) lo = mid + 1;
+      else hi = mid;
+    }
+    return QUEST.validRows[Math.max(0, Math.min(QUEST.validRows.length - 1, lo - 1))];
+  }
+  if (N <= 1) return 0;
+  return Math.max(0, Math.min(QN - 1, Math.round(state.i / (N - 1) * (QN - 1))));
+}
+
+function questTimeText(index) {
+  const value = QUEST && QUEST.time ? QUEST.time[index] : null;
+  if (!finite(value)) return '—';
+  if (QUEST.time_unit === 's') return value.toFixed(3) + ' s';
+  if (QUEST.time_source === 'sdk_timestamp_ns') return value.toFixed(3) + ' ms';
+  return '#' + Math.round(value).toString();
+}
+
+function questPosePoint(block, index) {
+  const xyz = block && block.xyz ? block.xyz[index] : null;
+  if (!xyz || xyz.length < 3 || !xyz.every(finite)) return null;
+  return { x: xyz[0], y: xyz[1], z: xyz[2] };
+}
+
+function questControllerBlock() {
+  const side = QUEST.pose_side === 'right' ? 'right' : 'left';
+  const controller = QUEST.controllers && QUEST.controllers[side];
+  return controller && controller.pose ? controller.pose : QUEST.main_pose;
+}
+
+function questMainValid(index) {
+  const block = questControllerBlock();
+  const point = questPosePoint(block, index);
+  return point && QUEST.tracked[index] && block.tracked[index] ? point : null;
+}
+
+function buildQuestProjection(w, h) {
+  const points = [];
+  const blocks = [
+    ['main', QUEST.main_pose],
+    ['head', QUEST.head],
+    ['left', QUEST.controllers && QUEST.controllers.left && QUEST.controllers.left.pose],
+    ['right', QUEST.controllers && QUEST.controllers.right && QUEST.controllers.right.pose],
+  ];
+  for (const [, block] of blocks) {
+    if (!block) continue;
+    for (let i = 0; i < QN; i++) {
+      const p = questPosePoint(block, i);
+      if (p) points.push(p);
+    }
+  }
+  if (!points.length) return null;
+
+  const cx = points.reduce((s, p) => s + p.x, 0) / points.length;
+  const cy = points.reduce((s, p) => s + p.y, 0) / points.length;
+  const cz = points.reduce((s, p) => s + p.z, 0) / points.length;
+  const yaw = -35 * Math.PI / 180;
+  const pitch = 24 * Math.PI / 180;
+  const raw = points.map(p => {
+    const dx = p.x - cx, dy = p.y - cy, dz = p.z - cz;
+    const rx = dx * Math.cos(yaw) - dz * Math.sin(yaw);
+    const rz = dx * Math.sin(yaw) + dz * Math.cos(yaw);
+    return { x: rx, y: -(dy * Math.cos(pitch) - rz * Math.sin(pitch)) };
+  });
+  const xs = raw.map(p => p.x), ys = raw.map(p => p.y);
+  const minX = Math.min(...xs), maxX = Math.max(...xs);
+  const minY = Math.min(...ys), maxY = Math.max(...ys);
+  const spanX = Math.max(maxX - minX, 1e-6);
+  const spanY = Math.max(maxY - minY, 1e-6);
+  const padX = 30, padY = 20;
+  const scale = Math.min((w - padX * 2) / spanX, (h - padY * 2) / spanY);
+  return {
+    project(p) {
+      const dx = p.x - cx, dy = p.y - cy, dz = p.z - cz;
+      const rx = dx * Math.cos(yaw) - dz * Math.sin(yaw);
+      const rz = dx * Math.sin(yaw) + dz * Math.cos(yaw);
+      const ry = -(dy * Math.cos(pitch) - rz * Math.sin(pitch));
+      return {
+        x: w / 2 + (rx - (minX + maxX) / 2) * scale,
+        y: h / 2 + (ry - (minY + maxY) / 2) * scale,
+      };
+    },
+  };
+}
+
+function drawQuestAxes(ctx, w, h) {
+  const origin = { x: 34, y: h - 28 };
+  const axes = [
+    { label: 'X', dx: 22, dy: 0, color: QUEST_COLORS.x },
+    { label: 'Y', dx: 0, dy: -22, color: QUEST_COLORS.y },
+    { label: 'Z', dx: -13, dy: 14, color: QUEST_COLORS.z },
+  ];
+  ctx.save();
+  ctx.font = '10px "Segoe UI", sans-serif';
+  ctx.lineWidth = 2;
+  for (const axis of axes) {
+    ctx.strokeStyle = axis.color;
+    ctx.beginPath(); ctx.moveTo(origin.x, origin.y);
+    ctx.lineTo(origin.x + axis.dx, origin.y + axis.dy); ctx.stroke();
+    ctx.fillStyle = axis.color;
+    ctx.fillText(axis.label, origin.x + axis.dx + 3, origin.y + axis.dy + 3);
+  }
+  ctx.restore();
+}
+
+function drawQuest3DBase() {
+  if (!QUEST) return;
+  const plot = el('plotQuest3D');
+  const base = plot.querySelector('.base');
+  const fitRes = fit(base);
+  if (!fitRes) return;
+  const { ctx, w, h } = fitRes;
+  questProjection = buildQuestProjection(w, h);
+  if (!questProjection) {
+    ctx.fillStyle = '#6d788b';
+    ctx.font = '12px "Segoe UI", sans-serif';
+    ctx.fillText('没有可用的主位姿追踪轨迹', 18, 28);
+    return;
+  }
+
+  ctx.save();
+  ctx.strokeStyle = '#1e2a3a';
+  ctx.lineWidth = 1;
+  for (let k = 1; k < 5; k++) {
+    const x = 18 + (w - 36) * k / 5;
+    const y = 18 + (h - 36) * k / 5;
+    ctx.beginPath(); ctx.moveTo(x, 18); ctx.lineTo(x, h - 18); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(18, y); ctx.lineTo(w - 18, y); ctx.stroke();
+  }
+
+  ctx.strokeStyle = '#f5a524';
+  ctx.lineWidth = 1.5;
+  ctx.lineJoin = 'round';
+  ctx.beginPath();
+  let drawing = false;
+  for (let i = 0; i < QN; i++) {
+    const point = questMainValid(i);
+    if (!point) { drawing = false; continue; }
+    const p = questProjection.project(point);
+    if (drawing) ctx.lineTo(p.x, p.y); else { ctx.moveTo(p.x, p.y); drawing = true; }
+  }
+  ctx.stroke();
+
+  const start = [...Array(QN).keys()].map(questMainValid).find(Boolean);
+  if (start) {
+    const p = questProjection.project(start);
+    ctx.fillStyle = '#54d49f';
+    ctx.beginPath(); ctx.arc(p.x, p.y, 3.5, 0, Math.PI * 2); ctx.fill();
+  }
+  ctx.restore();
+  drawQuestAxes(ctx, w, h);
+}
+
+function drawQuest3DOverlay() {
+  if (!QUEST || !questProjection) return;
+  const plot = el('plotQuest3D');
+  const over = plot.querySelector('.over');
+  const fitRes = fit(over);
+  if (!fitRes) return;
+  const { ctx } = fitRes;
+  const index = questIndex();
+  const markers = [
+    ['主位姿', QUEST.main_pose, '#f5a524'],
+    ['头显', QUEST.head, '#4da3ff'],
+    ['左手柄', QUEST.controllers && QUEST.controllers.left && QUEST.controllers.left.pose, '#38d39f'],
+    ['右手柄', QUEST.controllers && QUEST.controllers.right && QUEST.controllers.right.pose, '#f26d6d'],
+  ];
+  ctx.save();
+  ctx.font = '10px "Segoe UI", sans-serif';
+  for (const [label, block, color] of markers) {
+    const point = questPosePoint(block, index);
+    if (!point) continue;
+    const p = questProjection.project(point);
+    ctx.fillStyle = color;
+    ctx.strokeStyle = '#0c0f15';
+    ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(p.x, p.y, 5, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+    ctx.fillStyle = color;
+    ctx.fillText(label, p.x + 7, p.y - 6);
+  }
+  ctx.restore();
+}
+
+function questChartX(index) {
+  if (QUEST.alignment === 'sdk_unix') return QUEST.time[index];
+  if (QN <= 1) return 0;
+  return index / (QN - 1);
+}
+
+function questXBounds() {
+  if (QUEST.alignment === 'sdk_unix') return [0, Math.max(T1 - T0, 1e-6)];
+  return [0, 1];
+}
+
+function questValueBounds(block, columns) {
+  const values = [];
+  if (!block) return [0, 1];
+  for (let i = 0; i < QN; i++) {
+    if (!block.tracked[i]) continue;
+    for (const key of Object.keys(columns)) {
+      const source = columns[key];
+      const row = block[source.group] ? block[source.group][i] : null;
+      const value = row ? row[source.column] : null;
+      if (finite(value)) values.push(value);
+    }
+  }
+  if (!values.length) return [0, 1];
+  let lo = Math.min(...values), hi = Math.max(...values);
+  const pad = Math.max((hi - lo) * 0.08, 0.01);
+  return [lo - pad, hi + pad];
+}
+
+const questCharts = {};
+
+function drawQuestSeriesChart(key, plotId, block, columns, colors) {
+  if (!QUEST) return;
+  const plot = el(plotId);
+  const base = plot.querySelector('.base');
+  const fitRes = fit(base);
+  if (!fitRes) return;
+  const { ctx, w, h } = fitRes;
+  const pad = { l: 50, r: 10, t: 8, b: 18 };
+  const [xLo, xHi] = questXBounds();
+  const [yLo, yHi] = questValueBounds(block, columns);
+  const xOf = t => pad.l + (t - xLo) / (xHi - xLo) * (w - pad.l - pad.r);
+  const yOf = v => h - pad.b - (v - yLo) / (yHi - yLo) * (h - pad.t - pad.b);
+
+  ctx.font = '10px "Segoe UI", sans-serif';
+  ctx.strokeStyle = '#1d2532';
+  ctx.fillStyle = '#6d788b';
+  ctx.lineWidth = 1;
+  ctx.textAlign = 'right';
+  for (let k = 0; k <= 4; k++) {
+    const value = yLo + (yHi - yLo) * k / 4;
+    const y = Math.round(yOf(value)) + 0.5;
+    ctx.beginPath(); ctx.moveTo(pad.l, y); ctx.lineTo(w - pad.r, y); ctx.stroke();
+    ctx.fillText(value.toFixed(2), pad.l - 5, y + 3);
+  }
+  ctx.textAlign = 'center';
+  for (let k = 0; k <= 4; k++) {
+    const value = xLo + (xHi - xLo) * k / 4;
+    const x = Math.round(xOf(value)) + 0.5;
+    ctx.beginPath(); ctx.moveTo(x, pad.t); ctx.lineTo(x, h - pad.b); ctx.stroke();
+    const shown = QUEST.alignment === 'sdk_unix'
+      ? fmtTime(value)
+      : Math.round(value * 100) + '%';
+    ctx.fillText(shown, x, h - 6);
+  }
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(pad.l, pad.t, w - pad.l - pad.r, h - pad.t - pad.b);
+  ctx.clip();
+  ctx.lineWidth = 1.2;
+  if (block) {
+    for (const [name, source] of Object.entries(columns)) {
+      ctx.strokeStyle = colors[name];
+      ctx.beginPath();
+      let started = false;
+      for (let i = 0; i < QN; i++) {
+        const time = questChartX(i);
+        const row = block[source.group] ? block[source.group][i] : null;
+        const value = row ? row[source.column] : null;
+        if (!block.tracked[i] || !finite(time) || !finite(value)) {
+          started = false;
+          continue;
+        }
+        const x = xOf(time), y = yOf(value);
+        if (started) ctx.lineTo(x, y); else { ctx.moveTo(x, y); started = true; }
+      }
+      ctx.stroke();
+    }
+  }
+  ctx.restore();
+  questCharts[key] = { xOf, yOf, pad, xLo, xHi };
+}
+
+function drawQuestSeriesOverlay(key, plotId) {
+  const chart = questCharts[key];
+  if (!QUEST || !chart) return;
+  const plot = el(plotId);
+  const over = plot.querySelector('.over');
+  const fitRes = fit(over);
+  if (!fitRes) return;
+  const { ctx, h } = fitRes;
+  const index = questIndex();
+  const xValue = questChartX(index);
+  if (!finite(xValue)) return;
+  const x = Math.round(chart.xOf(xValue)) + 0.5;
+  ctx.strokeStyle = 'rgba(245,165,36,.85)';
+  ctx.lineWidth = 1.2;
+  ctx.beginPath();
+  ctx.moveTo(x, chart.pad.t);
+  ctx.lineTo(x, h - chart.pad.b);
+  ctx.stroke();
+}
+
+function questPositionText(block, index) {
+  const point = questPosePoint(block, index);
+  return point ? [point.x, point.y, point.z].map(v => v.toFixed(3)).join(' / ') : '—';
+}
+
+function updateQuestReadout() {
+  if (!QUEST) return;
+  const index = questIndex();
+  const quat = QUEST.main_pose && QUEST.main_pose.quat_xyzw ? QUEST.main_pose.quat_xyzw[index] : null;
+  const activeButtons = Object.entries(QUEST.buttons || {})
+    .filter(([, values]) => values[index])
+    .map(([name]) => name);
+  const quality = QUEST.quality || {};
+  const timeMissing = QUEST.time_source === 'sdk_timestamp_ns' ? '' :
+    '<div class="bad">SDK 时间戳不可用，当前横轴为轮询序号</div>';
+  const controllerRows = ['left', 'right'].map(side => {
+    const ctrl = (QUEST.controllers && QUEST.controllers[side]) || {};
+    const grip = ctrl.grip ? ctrl.grip[index] : null;
+    const trigger = ctrl.trigger ? ctrl.trigger[index] : null;
+    const axis = ctrl.axis ? ctrl.axis[index] : null;
+    const selected = side === QUEST.pose_side ? '（本次采集）' : '';
+    return '<h4>' + (side === 'left' ? '左手柄' : '右手柄') + selected + '</h4>' +
+      '<table>' +
+      '<tr><td>位置 xyz</td><td>' + questPositionText(ctrl.pose, index) + '</td></tr>' +
+      '<tr><td>grip / trigger</td><td>' + (finite(grip) ? grip.toFixed(3) : '—') +
+      ' / ' + (finite(trigger) ? trigger.toFixed(3) : '—') + '</td></tr>' +
+      '<tr><td>axis</td><td>' +
+      (axis && finite(axis[0]) && finite(axis[1]) ? axis[0].toFixed(2) + ' / ' + axis[1].toFixed(2) : '—') +
+      '</td></tr></table>';
+  }).join('');
+  const jointCounts = QUEST.hand_joint_counts || {};
+  const poseSource = QUEST.pose_source || 'controller';
+  const poseSide = QUEST.pose_side || '—';
+  el('questReadout').innerHTML =
+    '<table>' +
+    '<tr><td>sequence / 时间</td><td>' + QUEST.sequence[index] + ' / ' + questTimeText(index) + '</td></tr>' +
+    '<tr><td>主位姿来源</td><td>' + poseSource + '.' + poseSide + '</td></tr>' +
+    '<tr><td>追踪</td><td class="' + (QUEST.tracked[index] ? '' : 'bad') + '">' +
+      (QUEST.tracked[index] ? 'tracked' : 'untracked') + '</td></tr>' +
+    '<tr><td>主位姿 xyz · m</td><td>' + questPositionText(QUEST.main_pose, index) + '</td></tr>' +
+    '<tr><td>主四元数 xyzw</td><td>' +
+      (quat && quat.every(finite) ? quat.map(v => v.toFixed(3)).join(' / ') : '—') +
+      '</td></tr>' +
+    '<tr><td>头显 xyz</td><td>' + questPositionText(QUEST.head, index) + '</td></tr>' +
+    '<tr><td>手部关节 L / R</td><td>' + (jointCounts.left ? jointCounts.left[index] : 0) +
+      ' / ' + (jointCounts.right ? jointCounts.right[index] : 0) + '</td></tr>' +
+    '<tr><td>按键</td><td>' + (activeButtons.length ? activeButtons.join(', ') : '无') + '</td></tr>' +
+    '<tr><td>时间戳有效 / 缺失</td><td>' + (quality.sdk_valid_timestamps || 0) +
+      ' / ' + (quality.sdk_missing_timestamps || 0) + '</td></tr>' +
+    '</table>' +
+    '<div class="angles">主位姿 pose_6d = xyz（米）+ 四元数 xyzw（姿态方向）；曲线显示本次采集手对应的手柄。</div>' +
+    timeMissing + controllerRows;
+}
+
+function buildQuest() {
+  const card = el('questCard');
+  if (!QUEST || !QN) {
+    card.style.display = 'none';
+    if (!questNoticeShown) {
+      const message = META.quest_rows
+        ? 'Quest 数据已隐藏（--no-quest 或缺少可显示字段）'
+        : '本次采集没有 Quest 数据';
+      const div = document.createElement('div');
+      div.className = 'warn';
+      div.textContent = message;
+      el('warnBox').appendChild(div);
+      questNoticeShown = true;
+    }
+    return;
+  }
+  card.style.display = 'flex';
+  const aligned = QUEST.alignment === 'sdk_unix';
+  const sideLabel = QUEST.pose_side === 'right' ? '右手柄' : '左手柄';
+  el('questMeta').textContent =
+    QUEST.rows + ' 行 · ' + QUEST.shown + ' 点 · ' +
+    (aligned ? 'Unix 对齐' : QUEST.time_source === 'sdk_timestamp_ns'
+      ? '归一化进度' : '轮询序号');
+  el('questAlignNote').classList.toggle('aligned', aligned);
+  el('questAlignNote').textContent = QUEST.alignment_note;
+  el('questPosTitle').textContent = sideLabel + '位置 XYZ · m';
+  el('questQuatTitle').textContent = sideLabel + '姿态四元数 xyzw';
+  el('quest3DTitle').textContent = sideLabel + '位姿 3D 轨迹（X / Y / Z）';
+  const block = questControllerBlock();
+  drawQuestSeriesChart(
+    'pos',
+    'plotQuestPos',
+    block,
+    {
+      x: { group: 'xyz', column: 0 },
+      y: { group: 'xyz', column: 1 },
+      z: { group: 'xyz', column: 2 },
+    },
+    QUEST_COLORS,
+  );
+  drawQuestSeriesChart(
+    'quat',
+    'plotQuestQuat',
+    block,
+    {
+      qx: { group: 'quat_xyzw', column: 0 },
+      qy: { group: 'quat_xyzw', column: 1 },
+      qz: { group: 'quat_xyzw', column: 2 },
+      qw: { group: 'quat_xyzw', column: 3 },
+    },
+    { qx: '#f5a524', qy: '#38d39f', qz: '#4da3ff', qw: '#f26d6d' },
+  );
+  drawQuest3DBase();
+}
+
+function refreshQuest() {
+  if (!QUEST || !QN) return;
+  drawQuest3DOverlay();
+  drawQuestSeriesOverlay('pos', 'plotQuestPos');
+  drawQuestSeriesOverlay('quat', 'plotQuestQuat');
+  updateQuestReadout();
+}
+
 // ---------- camera previews ----------
 const VIDEOS = [];
 
@@ -1582,6 +2235,7 @@ function refresh() {
   drawSlotTable();
   updateReadout();
   updateClock();
+  refreshQuest();
   syncVideos(state.playing);
 }
 
@@ -1644,6 +2298,10 @@ function buildHeader() {
     ['手套帧', META.rows],
     ['速率', (META.rate_hz || 0).toFixed(1) + ' Hz'],
     ['Quest 行', META.quest_rows || 0],
+    [
+      'Quest 对齐',
+      QUEST ? (QUEST.alignment === 'sdk_unix' ? 'Unix' : '未做') : '无',
+    ],
     ['时钟', META.clock],
     ['格式', 'v' + (META.format_version ?? '?')],
   ];
@@ -1738,6 +2396,7 @@ function boot() {
   buildLegends();
   initSlotTable();
   buildCharts();
+  buildQuest();
   buildVideos();
   el('seek').max = String(N - 1);
   bindSeek('plotAngles');
@@ -1770,6 +2429,7 @@ function boot() {
     clearTimeout(resizeTimer);
     resizeTimer = setTimeout(() => {
       buildCharts();
+      buildQuest();
       refresh();
     }, 120);
   });
@@ -1805,7 +2465,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--max-points",
         type=int,
         default=DEFAULT_MAX_POINTS,
-        help="曲线最多保留多少帧（超出则等间隔抽稀）",
+        help="手套和 Quest 曲线各最多保留多少帧（超出则等间隔抽稀）",
     )
     parser.add_argument(
         "--dist-frames",
@@ -1816,7 +2476,21 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--no-quest",
         action="store_true",
-        help="不导出 Quest 数据",
+        help="不导出或绘制 Quest 数据",
+    )
+    parser.add_argument(
+        "--quest-align",
+        choices=QUEST_ALIGNMENT_CHOICES,
+        default="none",
+        help=(
+            "none=Quest 独立时间轴；sdk_unix=仅在 C8 报告通过时对齐到手套 Unix 轴"
+        ),
+    )
+    parser.add_argument(
+        "--quest-clock-report",
+        type=Path,
+        default=None,
+        help="quest_clock_probe.py 生成的通过报告；--quest-align sdk_unix 时必填",
     )
     parser.add_argument(
         "--save-png",
@@ -1853,7 +2527,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--ffmpeg",
         default=None,
-        help="ffmpeg 路径（默认读 $FFMPEG，再找 PATH 与 ~/bin/ffmpeg）",
+        help="ffmpeg 5+ 路径（默认读 $FFMPEG，再找 PATH）",
     )
     return parser
 
@@ -1864,13 +2538,36 @@ def main(argv: list[str] | None = None) -> int:
     if not root.is_dir():
         print(f"[错误] 目录不存在：{root}", file=sys.stderr)
         return 2
+    if args.no_quest and args.quest_align == QUEST_ALIGNMENT_SDK_UNIX:
+        print("[错误] --no-quest 与 --quest-align sdk_unix 不能同时使用", file=sys.stderr)
+        return 2
+    clock_report = None
+    if args.quest_align == QUEST_ALIGNMENT_SDK_UNIX:
+        if args.quest_clock_report is None:
+            print(
+                "[错误] --quest-align sdk_unix 必须同时提供 "
+                "--quest-clock-report",
+                file=sys.stderr,
+            )
+            return 2
+        try:
+            clock_report = load_clock_report(args.quest_clock_report)
+        except ValueError as exc:
+            print(f"[错误] {exc}", file=sys.stderr)
+            return 2
 
-    payload = collect_payload(
-        root,
-        max_points=max(16, args.max_points),
-        dist_frames=max(16, args.dist_frames),
-        with_quest=not args.no_quest,
-    )
+    try:
+        payload = collect_payload(
+            root,
+            max_points=max(16, args.max_points),
+            dist_frames=max(16, args.dist_frames),
+            with_quest=not args.no_quest,
+            quest_alignment=args.quest_align,
+            quest_clock_report=clock_report,
+        )
+    except ValueError as exc:
+        print(f"[错误] {exc}", file=sys.stderr)
+        return 2
 
     if args.html is not None:
         out_path = Path(args.html) if args.html else (root / "viewer.html")

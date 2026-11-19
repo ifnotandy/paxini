@@ -263,7 +263,7 @@ WSL 里相机必须走 Windows 的 `ffmpeg.exe`（usbipd 转发 UVC 会丢等时
 | `duration_s` / `sample_span_s` | 墙钟耗时 / 手套首末帧跨度                                                                |
 | `alignment`                    | 固定为 `none (raw per-source timestamps only)`                                   |
 | `pose`                         | 主位姿来源、分量顺序、坐标系说明                                                              |
-| `hand`                         | 串口、SN、SDK/固件版本、故障、回调耗时、队列溢出                                                   |
+| `hand`                         | 单只手套手别 `side`、Quest 请求手别 `pose_side_requested`、串口、SN、SDK/固件版本、故障、回调耗时、队列溢出 |
 | `quest`                        | `enabled`、`timestamp_source`、`timestamp_fields`、`rows`、`samples_dropped`、轮询次数 |
 | `cameras`                      | `backend`、每路设备节点、`epoch_unix_ns`、帧数、分辨率、实际 fps、时间窗、错误 |
 | `verify`                       | 行数自检结果（`row_mismatch` 必须为空）                                                   |
@@ -365,5 +365,6 @@ cameras/right_cam0      row 0
 
 读旧文件的老脚本在新文件上会直接 `KeyError`，不会有静默错误。
 
-对齐逻辑本身没有删除，只是搬到下游处理工程（暂定 `Paxini-Align/`）。那边需要的
+对齐逻辑本身没有删除，只是搬到下游处理工程（现有 `Paxini-Align/`）。那边需要的
 输入这里都有：`cap` 的两个 SDK 时间戳、`quest` 的四个 SDK 时间戳、`cameras` 的墙钟。
+Quest 路径还必须先通过 C8 报告与文件级时间戳质量门控。

@@ -178,6 +178,28 @@ ffmpeg 归零到首帧，再靠 `epoch` 平移成绝对时间。Δ 也不是同�
 **对策**：采前 `sudo timedatectl set-ntp false`。已经跳了的，对比 `timestamp_unix_ns`
 与 `timestamp_monotonic_ns` 能看出来，数据要么剔除要么作废。
 
+### 两路相机 + 手套同时工作时，整个 USB Hub 掉线
+
+**现象**：ffmpeg 已写入几十帧，随后报 `ioctl(VIDIOC_DQBUF): No such device`；
+`/dev/video*` 和 `/dev/ttyACM*` 一起消失。
+
+**根因**：USB Hub 在设备取流后被复位。2026-11-18 实测两个 MASTER Camera 与 PXCap
+共用的 `usb 3-1.3` Hub 整组 disconnect，几秒后重新枚举。这是供电/硬件拓扑问题，
+不是分辨率不支持。
+
+**对策**：相机和手套尽量直连电脑的不同 USB 控制器端口；必须使用 Hub 时选带独立
+电源的 USB 3.0 Hub，并用 `sudo dmesg -wT` 确认没有再次整组掉线。
+
+### stream-copy 的 `.progress` 没有 `frame=`，被误判为 0 帧
+
+**现象**：MKV 已经在增长，但相机就绪检查一直显示 0 帧。
+
+**根因**：ffmpeg 7 的 stream-copy 可能只输出 `out_time_us` 和 `total_size`。
+只解析 `frame` 会误判。
+
+**对策**：用 `FfmpegCamera.progress_signal()`，依次兼容 `frame`、`out_time_us × fps`
+和文件大小；不要恢复成只读 `frame`。
+
 ### 强杀进程 → 整份采集作废（2026-11-17 已修）
 
 **根因**：`Hdf5Recorder` 每 100 行 `resize` 一次，但 `file.flush()` 原本**只在 `close()`
@@ -224,7 +246,7 @@ Ctrl+C 正好落在一次批量写中间，`RLock` 会让同一线程重入成�
 只有 `--view` 时才执行。`--help` 测不出来。
 
 **对策**：改了目录结构，除了 `--help`，还要跑一遍会用到的功能路径和
-`python3.10 selftest/selftest.py`（107 项能覆盖绝大部分 import 链）。
+`python3.10 selftest/selftest.py`（136 项能覆盖绝大部分 import 链）。
 
 ### 外面的脚本引用了里面的模块
 
