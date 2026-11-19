@@ -29,7 +29,7 @@ import os
 import platform
 import queue
 import re
-import shutil
+import shlex
 import signal
 import sys
 import threading
@@ -101,6 +101,8 @@ QUEST_JOINT_CAPACITY = 26
 # get_body_joints_timestamp() 返回 24 个关节的 IMU 时间戳
 BODY_JOINT_TIMESTAMP_CAPACITY = 24
 CAMERA_SLOTS = ("cam0", "cam1")
+HAND_SIDES = ("left", "right")
+POSE_SIDE_CHOICES = ("auto",) + HAND_SIDES
 ANGLE_FIELDS = [
     "index_proximal",
     "index_distal",
@@ -1300,15 +1302,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--pose-side",
-        choices=("left", "right"),
-        default="right",
-        help="controller/hand pose 的左右手，默认 right",
+        choices=POSE_SIDE_CHOICES,
+        default="auto",
+        help=(
+            "controller/hand pose 的左右手；auto 跟随 --cap-side，"
+            "left/right 可显式覆盖"
+        ),
     )
     parser.add_argument(
         "--cap-side",
-        choices=("left", "right"),
+        choices=HAND_SIDES,
         default="right",
-        help="当前手套的手别，用于视频文件命名，默认 right",
+        help="当前单只 PXCap 的手别，默认 right；决定相机命名和 Quest 默认手别",
     )
     parser.add_argument(
         "--duration",
@@ -1547,6 +1552,16 @@ def validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
     if args.no_quest and args.start_pc_service:
         parser.error("--no-quest 与 --start-pc-service 不能同时使用")
 
+
+def resolve_pose_side(cap_side: str, requested_pose_side: str) -> str:
+    """Resolve the Quest side without changing either source's raw fields."""
+    if requested_pose_side == "auto":
+        return cap_side
+    if requested_pose_side in HAND_SIDES:
+        return requested_pose_side
+    raise ValueError(f"未知 pose side：{requested_pose_side!r}")
+
+
 def make_output_dir(argument: str | None) -> Path:
     if argument:
         return Path(argument).expanduser().resolve()
@@ -1574,6 +1589,73 @@ def create_output_dir(path: Path) -> None:
         raise RuntimeError(
             f"输出目录已存在：{path}。请删除旧目录或换一个 --output-dir"
         ) from exc
+
+
+def write_startup_failure(
+    output_dir: Path,
+    error: Exception | None,
+    *,
+    started_at: datetime,
+    cap_side: str,
+    pose_source: str,
+    pose_side: str,
+    pose_side_requested: str,
+    hand_port: str,
+    camera_devices: dict[str, str],
+    cameras: Sequence[FfmpegCamera],
+    ffmpeg: str | None,
+) -> Path:
+    """Preserve diagnostics when startup fails before data.h5 is created.
+
+    The normal run deletes a partially-created output directory. Keeping a
+    failed directory would otherwise look like a recording, so this writes an
+    explicit status file and never creates a fake HDF5 file.
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+    camera_info: dict[str, Any] = {}
+    for camera in cameras:
+        command: list[str] | None = None
+        command_error: str | None = None
+        try:
+            command = camera.command()
+        except Exception as exc:  # diagnostics must survive a broken backend
+            command_error = f"{exc.__class__.__name__}: {exc}"
+        camera_info[camera.camera_id] = {
+            "device": camera.device,
+            "command": command,
+            "command_text": shlex.join(command) if command is not None else None,
+            "command_error": command_error,
+            "video": str(camera.video_path),
+            "log": str(camera.log_path),
+            "log_tail": camera.log_tail(),
+            "failure": (
+                str(camera.failure) if camera.failure is not None else None
+            ),
+        }
+
+    payload = {
+        "status": "startup_failed",
+        "started_at": started_at.isoformat(timespec="milliseconds"),
+        "ended_at": datetime.now().astimezone().isoformat(
+            timespec="milliseconds"
+        ),
+        "error": str(error) if error is not None else "采集启动未完成",
+        "cap_side": cap_side,
+        "pose": {
+            "source": pose_source,
+            "side": pose_side,
+            "side_requested": pose_side_requested,
+        },
+        "hand_port": hand_port,
+        "camera_devices": dict(camera_devices),
+        "cameras": camera_info,
+        "env": environment_info(ffmpeg),
+    }
+    path = output_dir / "startup_failure.json"
+    with path.open("w", encoding="utf-8") as file:
+        json.dump(payload, file, ensure_ascii=False, indent=2, allow_nan=False)
+        file.write("\n")
+    return path
 
 
 def load_config_file(path: Path) -> dict[str, Any]:
@@ -1988,6 +2070,15 @@ def main(argv: Sequence[str] | None = None) -> int:
                 f"改名为 {DEFAULT_CONFIG_PATH.name} 才会生效"
             )
     validate_args(parser, args)
+    pose_side_requested = args.pose_side
+    args.pose_side = resolve_pose_side(args.cap_side, pose_side_requested)
+    if pose_side_requested == "auto":
+        log(f"[INFO] Quest 手别跟随手套：{args.cap_side}")
+    elif args.pose_side != args.cap_side:
+        warn(
+            f"手套手别为 {args.cap_side}，Quest 显式使用 "
+            f"{args.pose_side}；两路数据不会交换或镜像"
+        )
     # ``auto`` is resolved once here so that every later branch (device
     # discovery, ffmpeg command, manifest) sees a concrete backend.
     requested_backend = args.camera_backend
@@ -2025,8 +2116,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     output_dir_created = False
     exit_code = 0
     startup_error: Exception | None = None
+    session_started_at = datetime.now().astimezone()
     started_monotonic_ns = time.monotonic_ns()
     output_dir = make_output_dir(args.output_dir)
+    output_dir_preexisting = output_dir.exists()
     camera_slots = selected_camera_slots(args)
     camera_ids = tuple(f"{args.cap_side}_{slot}" for slot in camera_slots)
     slot_by_camera = dict(zip(camera_ids, camera_slots))
@@ -2418,6 +2511,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             metadata = {
                 "hand": {
                     "port": resolved_hand_port,
+                    "side": args.cap_side,
+                    "pose_side_requested": pose_side_requested,
                     "target_rate_hz": args.hand_rate,
                     "actual_rate_hz": actual_hand_rate,
                     "sdk_version": hand_collector.sdk_version,
@@ -2574,9 +2669,32 @@ def main(argv: Sequence[str] | None = None) -> int:
                     2.0,
                 )
 
-        if output_dir_created and not recorder_entered:
-            shutil.rmtree(output_dir, ignore_errors=True)
-            log(f"[INFO] 采集未启动，已清理本次创建的输出目录：{output_dir}")
+        if not recorder_entered and (startup_error is not None or exit_code != 0):
+            failure_dir = output_dir
+            if output_dir_preexisting:
+                stamp = session_started_at.strftime("%Y%m%d_%H%M%S")
+                base = output_dir.with_name(
+                    f"{output_dir.name}_startup_failure_{stamp}"
+                )
+                failure_dir = base
+                suffix = 2
+                while failure_dir.exists():
+                    failure_dir = base.with_name(f"{base.name}_{suffix}")
+                    suffix += 1
+            failure_path = write_startup_failure(
+                failure_dir,
+                startup_error,
+                started_at=session_started_at,
+                cap_side=args.cap_side,
+                pose_source=args.pose_source,
+                pose_side=args.pose_side,
+                pose_side_requested=pose_side_requested,
+                hand_port=resolved_hand_port,
+                camera_devices=camera_devices,
+                cameras=cameras,
+                ffmpeg=ffmpeg,
+            )
+            log(f"[INFO] 启动失败诊断已保留：{failure_path}")
 
     return exit_code
 

@@ -11,11 +11,12 @@ Paxini-Cap/
 │   ├── calib/              # 手套零点标定（hand/ 放标零报告，不入库）
 │   ├── latency/            # 延迟测量：两个脚本 + records/ 台账（一台机器一个文件）
 │   ├── viewer/             # 回放与实时视图
-│   ├── selftest/           # 不接硬件的自检，107 项
+│   ├── diagnostics/        # Quest 时间戳时钟域探针（不写 data.h5）
+│   ├── selftest/           # 不接硬件的自检，136 项
 │   ├── scripts/            # 一键采集脚本
 │   ├── recordings/         # 采集输出（data_<日期>_<序号>/）
 │   └── cap_config.yaml     # 可选配置（存在即加载，命令行优先）
-├── Paxini-Align/       # 下游：把手套流重采样到相机帧时刻（→ README）
+├── Paxini-Align/       # 下游：手套 + 可选 Quest 按相机帧时刻对齐（→ README）
 │   ├── align_capture.py    # 主程序：读 data.h5，输出 aligned_<cam>.h5
 │   └── selftest.py         # 合成数据自检 12 项，不接硬件
 ├── DOC/                # 文档（格式说明、时钟说明、待验证清单、标定）
@@ -38,12 +39,13 @@ Paxini-Cap/
 
 ## 0. 接手必读
 
-**当前状态**：真机（手套 + 双路相机）已跑通，但 **Quest 整组未测**；相机标定**已决定不做**
-（E8，下游扩散模型只吃图像、不解算位姿）。Quest 补上之前，跨源对齐做不了；标定不做，
-任何"距离 / 位置 / 三维"的结论都不成立。逐项状态见 §6 与
-[`DOC/待验证清单.md`](DOC/待验证清单.md)。107 项 `selftest.py` 只覆盖纯逻辑
+**当前状态**：真机（手套 + 双路相机 + Quest XRoboToolKit）已跑通；Quest 的 SDK
+时间戳时钟域尚未确认，因此跨源绝对时间对齐仍不能成立。相机标定**已决定不做**
+（E8，下游扩散模型只吃图像、不解算位姿）；标定不做，任何"距离 / 位置 / 三维"的
+结论都不成立。逐项状态见 §6 与 [`DOC/待验证清单.md`](DOC/待验证清单.md)。
+136 项 `selftest.py` 只覆盖纯逻辑
 （帧解析、行轴、配置、视图挂钩）；**下游配对已有代码**：`Paxini-Align/` 把手套流按相机
-帧时刻重采样（见 §5）。
+帧时刻重采样，并在通过 C8 后可选对齐 Quest（见 §5）。
 
 **数据现状（2026-11-17 核对）**：`recordings/` 里 13 份采集中只有 4 份可用
 （`data_20261113_2 / _5 / _11`、`data_20261116_1`）。另外 8 份是采集中途被强杀的文件，
@@ -107,7 +109,7 @@ Paxini-Cap/
 cd Cap_Quest
 python3.10 -m py_compile capture/*.py viewer/*.py selftest/*.py latency/*.py calib/*.py
 python3.10 -m pyflakes capture/*.py viewer/*.py selftest/*.py latency/*.py calib/*.py
-python3.10 selftest/selftest.py          # 应为 107 项全过
+python3.10 selftest/selftest.py          # 应为 136 项全过
 ```
 
 - 改数据结构或行为，**必须加 selftest 用例**，不能只靠手跑
@@ -124,12 +126,61 @@ python3.10 selftest/selftest.py          # 应为 107 项全过
 | 手套 SDK | `pxhandsdk 1.0.0.0`，`dpkg -i` 装到 `/usr/lib/python3/pxhandsdk` |
 | Python 包 | `numpy` / `h5py` / `xrobotoolkit-sdk`，用 `python3.10 -m pip install --user` |
 | 回放 | `matplotlib`（随 requirements 装）；窗口模式还要 `python3.10-tk`，`--html` 不需要 |
-| ffmpeg | 需要带 `v4l2` 输入和 `-fps_mode` 的版本（5.0+）。系统没装也没 sudo 权限时，把静态版放到 `~/bin/ffmpeg`（含 `ffprobe`） |
+| ffmpeg | 需要带 `v4l2` 输入和 `-fps_mode` 的版本（5.0+）。系统未提供时，把静态版目录加入 `PATH`，或通过 `FFMPEG` 指定 |
 | ffmpeg（Windows） | `sdk/ffmpeg-win/ffmpeg.exe`，只在 `camera_backend: wsl` 时用。不入库，见 [`sdk/README.md`](sdk/README.md) |
 | USB 转发 | Windows 侧 `usbipd` 把设备 attach 进 WSL |
 
 不要用 `python3.10 -m venv`：这个环境里 ensurepip 会失败，直接用系统 3.10 加
 `--user` 装包。
+
+### 1.1 运行 XRoboToolKit 的前置条件
+
+Quest 数据链路不是只装一个 Python 包就能工作。开始采集前必须同时满足以下条件：
+
+| 项 | 要求 |
+|---|---|
+| Quest 3 | 已开启开发者模式和 USB 调试；首次连接使用支持数据传输的 USB 线，并在头显内允许 RSA 调试授权 |
+| ADB | 主机已安装 Android platform-tools，`adb devices -l` 能执行；`adb` 不在 `PATH` 时用 `--adb` 指定 |
+| PC Service | 已安装 `XRoboToolkit_PC_Service_1.0.0_ubuntu_22.04_amd64.deb`，`RoboticsServiceProcess` 常驻运行 |
+| Python SDK | `xrobotoolkit-sdk` 必须装在采集程序使用的同一个 `python3.10` 环境中 |
+| Quest APK | APK 位于 `sdk/xrobotoolkit/XRoboToolkit-Quest-1.0.1.apk`，包名为 `com.xrobotoolkit.client.quest`；二进制未入库，下载与校验见 [`sdk/README.md`](sdk/README.md) |
+| 网络 | Quest 与运行 PC Service 的主机位于可互通的局域网；首次配置时无线 ADB 默认使用 `5555` |
+| 头显设置 | 进入 XRoboToolKit 后保持 APK 运行，并开启 **Tracking** 和 **Send**；手柄需要唤醒 |
+
+PC Service 不会开机自启，采集程序默认也不会替你启动。每次开始 Quest 采集前，先在一个终端运行：
+
+```bash
+cd /opt/apps/roboticsservice
+./runService.sh
+ps -eo pid,cmd | grep '[R]oboticsServiceProcess'
+```
+
+`runService.sh` 自己设置动态库、Qt 插件和 QML 路径，并以后台进程启动
+`RoboticsServiceProcess`。不要只运行 `RoboticsServiceProcess`，也不要运行 `run3D.sh`
+（WSL 没有显示环境时会失败）。PC Service 监听 `*:63901` 和 `127.0.0.1:60061`；
+Quest 跟踪数据通过局域网进入前者。若主机是 WSL2，默认 NAT 不保证头显能直接访问
+WSL 内的服务，需要让 PC Service 对局域网可达（例如使用 WSL mirrored networking，
+或在 Windows 侧配置端口转发），同时放行 Windows 防火墙。
+
+安装并确认 Python SDK 可用：
+
+```bash
+python3.10 -m pip install --user xrobotoolkit-sdk
+python3.10 -c "import xrobotoolkit_sdk; print('xrobotoolkit_sdk OK')"
+```
+
+首次连接 Quest 时保持 USB 线连接，然后可先用一个短任务验证整条链路：
+
+```bash
+cd Paxini-Cap/Cap_Quest
+python3.10 capture/quest3.py --duration 10
+```
+
+正常结果应包含 XRoboToolkit Python SDK 初始化成功、Quest 无线 ADB 已连接，以及
+`已通过 PC Service 收到 Quest 跟踪数据`。若只准备 APK 和 ADB、不读取数据，可加
+`--prepare-only`；若不想传 USB 线，也可直接使用 `--quest-ip <Quest 的局域网 IPv4>`
+连接已开启无线 ADB 的 Quest。看到 SDK 已初始化但迟迟没有有效 pose 时，依次检查
+PC Service、Quest Wi-Fi、APK 的 Tracking/Send 开关和手柄唤醒状态。
 
 ## 2. 硬件接入
 
@@ -172,23 +223,24 @@ sudo /usr/share/pxhandsdk/scripts/setup-serial-access.sh
 python3.10 -m pip install --user -r requirements.txt
 ```
 
-装完先跑 §0.4 的三关：`selftest` 107 项全过说明环境没问题，此时不需要插硬件。
+装完先跑 §0.4 的三关：`selftest` 136 项全过说明环境没问题，此时不需要插硬件。
 
 **验证设备与日常运行不在本文档**：`--list-devices`、采集、`--view`、一键脚本、回放、
 参数表全在 [`Cap_Quest/README.md` §1](Cap_Quest/README.md)。采前关 NTP、
-`export PATH="$HOME/bin:$PATH"`、没有头显加 `--no-quest` 这三条纪律，在该文件的
+`export FFMPEG=/path/to/ffmpeg-5-or-newer`、没有头显加 `--no-quest` 这三条纪律，在该文件的
 【快速开始】与【§2 时间戳】里各有完整说明，这里不再重列。
 
 ## 4. 验证状态
 
 **结论：采集链路可用，跨源分析不可用。**
 
-真机（手套 + 双路相机）2026-11-13 已跑通，逐帧无丢帧、关 NTP 后时钟零跳变；不接
-硬件时 `selftest` 107 项全过。但三处缺口没补上之前，任何跨源结论都不成立：
+真机（手套 + 双路相机）2026-11-13 已跑通，逐帧无丢帧、关 NTP 后时钟零跳变；
+2026-11-18 Quest XRoboToolKit 左手联合采集也已跑通。不接硬件时 `selftest` 136 项
+全过。但下面三处边界仍决定哪些结论成立：
 
 | 缺口 | 状态 | 后果 |
 |---|---|---|
-| Quest 整组 | 无头显，C3~C8 未测 | `sdk_timestamp_ns` 属于哪个时钟未定，跨源对齐缺前置 |
+| Quest 时间域 | XRoboToolKit 采集已跑通，C8 未定 | `sdk_timestamp_ns` 属于哪个时钟未定，跨源绝对时间对齐仍不能成立 |
 | 相机标定 | **已划出范围**（E8） | 下游扩散模型只吃图像、不算位姿，因此不做。代价是不做任何"距离 / 位置 / 三维"结论 |
 | 手套零点标定 | 代码已有，无真机记录 | 关节角零点可能是偏的，默认阈值待 `info` 噪声底复核 |
 
@@ -201,7 +253,9 @@ python3.10 -m pip install --user -r requirements.txt
 1. **`Paxini-Align/`（已实现，2026-11-17）**：相机时间戳为采样网格，减去实测 Δ 后
    把手套流线性插值到该时刻，一行一个训练样本；输出 `aligned_<cam>.h5`，含取图用的
    `frame_index` 与插值跨度质量列。用法与字段见 [`Paxini-Align/README.md`](Paxini-Align/README.md)。
-   **Quest 暂不处理**；两路相机不同步（cam1 最近帧偏差半帧），要严格同帧就得各跑一次。
+   2026-11-18 增加可选的 Quest 因果对齐：只有通过 C8 报告且源时间戳质量达标时才启用，
+   取目标时刻之前最近样本并复制完整 `quest/` 数据组。C8 解决时钟域，**不等于 Quest
+   采样链路延迟已标定**。两路相机不同步（cam1 最近帧偏差半帧），要严格同帧就各跑一次。
 2. **相机延迟 Δ 现场实测**（不是标定，别混）：改分辨率、帧率、codec、USB 口、机器之后
    重跑 `latency/`，下游从台账取最近一次合格值。扩散模型对观测-动作错帧比人眼敏感得多，
    便宜但漏了要重采。

@@ -36,11 +36,13 @@ ffmpeg 让每帧 pts 直接取主机墙钟并原样写进容器，停止后用 `
 | `capture/` | 采集主程序与设备驱动层 | `collect_cap.py`（主）、`camera_ffmpeg.py`、`quest3.py` |
 | `calib/` | 手套零点标定（写设备存储；报告落 `calib/hand/`，不入库） | `hand_calib.py` |
 | `latency/` | 相机延迟测量 | `measure_camera_latency.py`（原生 Ubuntu / V4L2）、`measure_camera_latency_wsl.py`（WSL，相机走 DirectShow）；结果记在 `records/` |
-| `viewer/` | 可视化 | `visualize.py`（回放）、`live_view.py`（实时） |
+| `viewer/` | 可视化 | `visualize.py`（回放）、`quest_view.py`（Quest payload）、`live_view.py`（实时） |
+| `diagnostics/` | 时钟域诊断 | `quest_clock_probe.py`（C8 探针；产物落 `clock_probe/`） |
 | `selftest/` | 不接硬件的自检 | `selftest.py` |
 | `scripts/` | 一键脚本 | `run_capture_noquest.sh` |
 | `recordings/` | 采集输出（`data_<日期>_<序号>/`） | — |
 | `cap_config.yaml` | 采集配置，采集 / 延时测量 / 标定三处共用 | — |
+| `QUICKSTART.md` | 当前机器的 XRoboToolKit 联合采集快速上手 | — |
 
 跨目录依赖靠各脚本开头的 `sys.path` 注入解决：`viewer/`、`selftest/`、`latency/`
 都会把 `capture/` 加进搜索路径。`calib/` 只依赖 SDK，不引用采集模块，跟 `capture/`
@@ -51,7 +53,7 @@ ffmpeg 让每帧 pts 直接取主机墙钟并原样写进容器，停止后用 `
 
 ```bash
 cd Paxini-Cap/Cap_Quest
-export PATH="$HOME/bin:$PATH"          # 静态版 ffmpeg/ffprobe
+export FFMPEG=/path/to/ffmpeg-5-or-newer
 python3.10 capture/collect_cap.py --list-devices
 ```
 
@@ -82,7 +84,7 @@ python3.10 capture/collect_cap.py --no-quest           # 没有头显时只采�
 python3.10 capture/collect_cap.py --camera-mode none   # 不录视频
 ```
 
-启动顺序（任一环节失败都在开始采集前退出，不留半截数据）：
+启动顺序（任一环节失败都在开始采集前退出，不生成伪造的 `data.h5`）：
 
 ```text
 串口识别（USB 28e9:018a）
@@ -93,6 +95,15 @@ python3.10 capture/collect_cap.py --camera-mode none   # 不录视频
 ```
 
 `--skip-adb` 可跳过 ADB，但必须自己先打开 XRoboToolkit 并开启 Tracking 和 Send。
+
+单只 PXCap 通过 `--cap-side left|right` 选择手别。Quest 默认由
+`--pose-side auto` 跟随手套手别；需要“左手套 + 右手柄”等特殊组合时，可显式传
+`--pose-side left|right` 覆盖。选择手别只影响 provenance 和相机命名，手套原始字段
+原样保存，不做镜像或符号转换。
+
+启动在创建 `data.h5` 之前失败时，程序保留本次目录并写
+`startup_failure.json`，同时保留 `cameras/*.log`、完整 ffmpeg 命令和日志末尾；
+不会生成伪造 HDF5。若 `--output-dir` 原本已存在，诊断写到旁边的新目录，不污染旧数据。
 
 #### 一键脚本（无 Quest 版）
 
@@ -120,8 +131,8 @@ usbipd 的 attach 随之失效，而 `usbipd list` 仍显示 `Attached`。脚本
 所以必须先重试而不是判一次就放弃。busid 从 `usbipd list` 里按 `28e9:018a` 自动查，
 换机器或换 USB 口不用改脚本；要指定就 `USBIPD_BUSID=3-3 bash scripts/run_capture_noquest.sh`。
 
-脚本不写 `~/bin` 这种个人路径：ffmpeg 按 `$FFMPEG` → `PATH` → `~/bin`、`/usr/local/bin`
-等常见位置查找，找到后把它的目录加到 `PATH` 最前面，`ffprobe` 优先取同目录的那份。
+脚本不写个人目录：ffmpeg 按 `$FFMPEG`、`PATH`、`/usr/local/bin` 等常见位置查找；
+找到后把它的目录加到 `PATH` 最前面，`ffprobe` 优先取同目录的那份。
 
 #### 换一台机器要改什么
 
@@ -195,12 +206,13 @@ recordings/data_<YYYYMMDD>_<当天序号>/
 ├── data.h5
 ├── manifest.json
 └── cameras/
-    ├── right_cam0.mkv  right_cam0.log  right_cam0.progress
-    └── right_cam1.mkv  right_cam1.log  right_cam1.progress
+    ├── <cap_side>_cam0.mkv  <cap_side>_cam0.log  <cap_side>_cam0.progress
+    └── <cap_side>_cam1.mkv  <cap_side>_cam1.log  <cap_side>_cam1.progress
 ```
 
 `.log` 是 ffmpeg 的 stderr，`.progress` 是 `-progress` 输出，都用来看相机是否真的
-在出帧，可以删。
+在出帧，可以删。启动失败时同目录还会有 `startup_failure.json`，且不会创建
+`data.h5`；看到该文件表示本次不是成功采集。
 
 ### 4.1 `data.h5`
 
@@ -220,7 +232,7 @@ HDF5 只存索引性质的时间戳。
 | `actual_rate_hz` | 按首末帧**单调钟**跨度算的实际频率 |
 | `duration_s` / `sample_span_s` | 墙钟耗时 / 手套首末帧跨度 |
 | `alignment` | 固定 `none (raw per-source timestamps only)` |
-| `hand` | 串口、SN、SDK/固件版本、故障、回调耗时、队列溢出 |
+| `hand` | 手别 `side`、Quest 请求手别 `pose_side_requested`、串口、SN、SDK/固件版本、故障、回调耗时、队列溢出 |
 | `quest` | enabled、rows、samples_dropped、轮询次数与超时 |
 | `cameras` | 每路设备、帧数、分辨率、实际 fps、时间窗、错误 |
 | `verify` | 行数自检（`row_mismatch` 必须为空） |
@@ -250,6 +262,61 @@ python3.10 viewer/visualize.py recordings/data_<日期>_<序号> --save-png run.
 - `--html` 导出 `viewer.html`，手套/Quest 数据内嵌，双击就能看，方便发给别人；视频除外
   —— 转码后的 mp4 放在同级的 `preview/` 下，拷给别人时要连目录一起拷
 - `--save-png` 用 Agg 渲染首帧，无显示器也能出图
+
+#### Quest 3 面板
+
+浏览器版会自动检测 `quest/`。有数据时增加 Quest 面板，无数据时自动隐藏；`--no-quest`
+可强制不导出。面板根据 manifest 的 `pose.side` / `hand.side` 自动选择本次采集手
+对应的手柄，包含：
+
+- 该手柄的位置 XYZ 曲线（米）和姿态四元数 xyzw 曲线；
+- 该手柄的 3D XYZ 轨迹，同时显示头显和左右手柄当前位置；
+- 当前 sequence、SDK 相对时间、主位姿与四元数、追踪状态、手柄输入和手部关节数；
+- 缺失 SDK 时间戳保留断点；整列不可用时降级为轮询 sequence，并明确提示。
+
+**Quest 与手套/相机未做跨源时间对齐。** 页面共用播放/暂停和倍速控件，但 Quest
+使用自身归一化进度；页面顶部、Quest 分区和 Tk 摘要都会显示这一限制。原因是 C8
+尚未确认 `sdk_timestamp_ns` 的时钟域，不能按真实同一时刻配对。
+
+默认 `none` 模式把 Quest 位置/四元数曲线映射到 `0%~100%` 归一化横轴，使图宽和
+游标与手套主图对齐，并复用主网格列宽和绘图边距，使横轴左右边界与“合力模长 B”
+完全一致；这不代表物理时间。`sdk_unix` 模式改用与手套相同的相对 Unix 秒轴。
+3D 轨迹固定放在右侧。
+
+`pose_6d` 是选定主位姿的紧凑表示：`x,y,z` 是米制位置，`qx,qy,qz,qw` 是姿态
+四元数；它不是手部 26 关节骨架，也不代表已经做过相机/手套空间外参标定。
+
+#### C8 时钟探针与可选对齐
+
+先运行独立探针。它只写 `clock_probe/run_<时间>/samples.jsonl` 和 `report.json`，
+不会修改 `data.h5`：
+
+```bash
+python3.10 diagnostics/quest_clock_probe.py \
+  --duration 60 \
+  --start-pc-service
+```
+
+报告检查有效时间戳覆盖率、探针有效时长、时间戳倒退、长时间重复冻结、相对主机
+Unix 时钟的残差和时钟斜率。默认阈值为有效覆盖 ≥95%、有效时长 ≥目标的 95%、
+同一时间戳连续重复 ≤10 个轮询周期、残差中位数 ≤10 ms、p99 ≤30 ms、
+斜率误差 ≤100 ppm。
+
+现有 `data_20261118_1` 不满足文件级门控：有效时间戳比例 90.4%，最长同一时间戳
+连续重复 5472 次，因此即使提供一份通过的时钟探针报告，查看器也会拒绝对齐该文件。
+
+只有报告为 `passed=true` 且 `clock_domain=unix_epoch`，才允许显式启用对齐：
+
+```bash
+python3.10 viewer/visualize.py recordings/data_YYYYMMDD_N \
+  --html \
+  --quest-align sdk_unix \
+  --quest-clock-report clock_probe/run_YYYYMMDD_HHMMSS/report.json
+```
+
+对齐后 Quest 时间换算到手套首帧 Unix 时间轴。游标取目标时刻之前最近的 Quest 样本，
+不插值；同一时间戳重复时当前读数取最后一条，轨迹仍保留全部有效点。默认
+`--quest-align none`，未通过报告时 `sdk_unix` 会直接报错，不会静默对齐。
 
 #### 视频面板（只做浏览器版）
 
@@ -437,9 +504,9 @@ view: false              # 采集时开实时窗口
 | `--hand-port` | `auto` | 手套串口；auto 按 USB `28e9:018a` 发现 |
 | `--hand-rate` | `120` | 连续采集目标频率，范围 1..300 |
 | `--list-devices` | — | 打印串口/视频节点/ffmpeg 版本后退出 |
-| `--cap-side` | `right` | 手套手别，决定视频文件名 |
+| `--cap-side` | `right` | 单只手套手别，决定相机命名和 Quest 默认手别 |
 | `--pose-source` | `controller` | `controller` / `hand` / `head`，只影响 `pose_6d` |
-| `--pose-side` | `right` | controller/hand 的左右手 |
+| `--pose-side` | `auto` | `auto` 跟随 `--cap-side`；`left` / `right` 可显式覆盖 |
 | `--quest-rate` | `120` | Quest 轮询频率 |
 | `--quest-start-timeout` | `120` | 等待有效 Quest pose 的超时 |
 | `--quest-ready-samples` | `3` | 启动采集前要求的连续有效 pose 次数 |
@@ -469,8 +536,8 @@ view: false              # 采集时开实时窗口
 | `--start-pc-service` / `--pc-service-script` / `--no-pc-service-check` | — | PC Service 管理 |
 | `--config` | `cap_config.yaml` | 配置文件路径（YAML；旧的 JSON 也能解析） |
 
-ffmpeg/ffprobe 从 `PATH` 找（也认环境变量 `FFMPEG`），所以先
-`export PATH="$HOME/bin:$PATH"`。
+ffmpeg/ffprobe 从 `PATH` 找，也认环境变量 `FFMPEG`。不使用统一系统路径时，
+先执行 `export FFMPEG=/path/to/ffmpeg-5-or-newer`。
 
 ### 6.3 相机后端：linux / wsl
 
@@ -636,9 +703,9 @@ ls -l /dev/serial/by-id/ /dev/ttyACM* /dev/ttyUSB* 2>/dev/null
 | 项 | 结果 |
 |---|---|
 | `py_compile` / `pyflakes` | 全过，0 告警 |
-| `selftest.py` | **107 项全过**（帧解析、Quest 四列时间戳、两条行轴、行数自检、`--omit-distribution`、实时视图推送、YAML 配置与行内注释、相机后端 auto 判定、相机双后端命令、相机单调钟写入、回放载荷的保峰抽稀/时钟漂移/空负载标记、相机首帧偏移/转码失败路径、MJPEG 拆帧与预览输出） |
+| `selftest.py` | **136 项全过**（在原有覆盖之外增加 C8 时钟探针、sdk_unix 报告与当前文件质量门控、Quest 独立时间轴/sequence 降级和失败工件） |
 | `--list-devices` | 正常输出串口 / V4L2 节点 / ffmpeg |
-| 无设备时报错 | 退出码 **2**，不创建 `recordings/` |
+| 无设备时报错 | 退出码 **2**，保留 `startup_failure.json`，不创建 `data.h5` |
 | 相机延迟测量（WSL 路径） | 三次实测 189.71 / 287.22 / 192.30 ms，IQR 5~6 ms；台账 `latency/records/andy-win.yaml` |
 | 假 SDK 驱动真实主循环（python3.10，5 秒） | 602 行、**120.0 Hz**、`verify` 为空、`alignment: none` |
 | 回调耗时（60 秒合成帧） | 均值 0.21 ms、最大 0.62 ms |
@@ -646,12 +713,13 @@ ls -l /dev/serial/by-id/ /dev/ttyACM* /dev/ttyUSB* 2>/dev/null
 | ffmpeg 链路（lavfi 合成源） | 首帧 pts 1794388000，间隔 33/34 ms，SIGINT 后 ffprobe 能读全帧 |
 | `visualize.py`（合成 data.h5，7200 帧 / 60 s） | 窗口与 `--html` 都能出图；HTML 1.45 MB；实测回放 1.01× 实时；`--save-png` 首帧正常 |
 | `live_view.py`（合成 1200 帧 @120 Hz） | 子进程正常起停；父进程 `push` 均值 **130 µs**、p99 262 µs；240 帧队列零丢弃；`close` 30 ms |
+| Quest 左手真机联调（2026-11-18） | XRoboToolKit `controller.left` 连续有效；PXCap 1200 帧 / 120.0 Hz、Quest 2400 样本、两路相机各 245 / 300 帧 / 15 fps；37 个数据集行数自检通过 |
 | **真机（手套 + 双相机 + 回放 + 实时窗口）** | 手套 115.4~118.3 Hz（其中一次 20 s 内 34 处帧间隔空洞，疑 USB 通路，B8 待复测）、两路相机恒 30.0 fps、37 个数据集零不一致；`copy` / `h264` 双档均不丢帧；关 NTP 后时钟零跳变。回放交互、视频对齐（误差 ≤ 半帧）、实时窗口与相机关键帧全部通过。**逐项实测与取证在 [`../DOC/待验证清单.md`](../DOC/待验证清单.md) A / B / D / F 组**，这里不再重复罗列 |
 
 ### 10.2 未执行
 
-- **Quest 整组**（无头显）：C3~C8 未测。C8「`sdk_timestamp_ns` 属于哪个时钟」是跨源
-  对齐的前置条件。前置已备齐：PC Service 能起、APK 已入库并校验。
+- **Quest 跨源时间域**：XRoboToolKit 真机采集已跑通，但 C8「`sdk_timestamp_ns`
+  属于哪个时钟」仍未确认，因此 Quest 与手套/相机的绝对时间对齐仍不能成立。
 - **相机标定不做**（不是"没验证"，也不是"待实现"）：2026-11-17 决定划出范围，下游扩散
   模型只吃图像、不算位姿，四组量（内参/双相机外参/手套→相机/Quest→相机）都没有使用场景，
   见 [`../DOC/待验证清单.md`](../DOC/待验证清单.md) E8。代价是指尖三维位置、深度、

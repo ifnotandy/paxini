@@ -282,12 +282,12 @@ def record_with_qr(
     period = 1.0 / target_hz if target_hz > 0 else 0.0
     # 先等相机出图，再开始计时：启动那几秒的帧里还没有二维码。
     deadline_wait = time.monotonic() + 20.0
-    last_frames = 0
+    last_progress = 0
     ready_streak = 0
     while time.monotonic() < deadline_wait:
-        frames = camera.progress_frames()
-        if frames > last_frames:
-            last_frames = frames
+        progress = camera.progress_signal()
+        if progress > last_progress:
+            last_progress = progress
             ready_streak += 1
             if ready_streak >= 3:
                 break

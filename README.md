@@ -13,7 +13,7 @@ PXCap III 数据手套与 PXDex III 灵巧手的开发工作区。两条线，�
 | 路径 | 内容 |
 |---|---|
 | `Paxini-Cap/` | Cap 采集上位机 → [工程说明](Paxini-Cap/README.md) |
-| `Paxini-Cap/Paxini-Align/` | 下游重采样：手套流按相机帧时刻插值 → `aligned_*.h5` → [说明](Paxini-Cap/Paxini-Align/README.md) |
+| `Paxini-Cap/Paxini-Align/` | 下游重采样：手套流插值、通过 C8 后可选 Quest 因果配对 → `aligned_*.h5` → [说明](Paxini-Cap/Paxini-Align/README.md) |
 | `Paxini-Dex/` | Dex 执行器（SDK 封装、`Dex_Quest`、`Dex_Admittance`）→ [说明](Paxini-Dex/README.md) |
 | `agent/` | 给 AI 助手的项目认知文档 → [入口](agent/README.md) |
 | `厂商资料/` | 厂商 PDF 说明书、SDK 手册、PXCap / PXDex 的 URDF 与 STL |
@@ -65,6 +65,6 @@ Python 3.10 + Ubuntu 22.04/24.04，或 Windows + WSL2。手套 SDK 只能用 `py
 
 - `Paxini-Cap/` 原仓库 `ifnotandy/Paxini-Cap`（冻结在 72c6058）
 - `Paxini-Dex/` 原仓库 `Dongqiao6/Paxini`（同步至 fb224f2）
-- `厂商资料/` 与根目录文档为直接归档
+- `厂商资料/` 与根目录文档随仓库保留；录像、HDF5、APK、DEB、缓存和采集产物默认不入库
 
 原两个 `.git` 目录备份在 `C:\Users\Andy\Desktop\paxini-git备份\`，需要拆回独立仓库时可用。

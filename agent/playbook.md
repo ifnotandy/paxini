@@ -10,11 +10,11 @@ sudo dpkg -i ../sdk/pxhandsdk_1.0.0.0.ubantu2204_amd64.deb
 python3.10 -m pip install --user -r ../requirements.txt
 
 # 1) 确认设备在
-export PATH="$HOME/bin:$PATH"
+export FFMPEG=/path/to/ffmpeg-5-or-newer
 python3.10 capture/collect_cap.py --list-devices    # 串口末尾应是 PXCap
 
 # 2) 不接硬件先自检
-python3.10 selftest/selftest.py                     # 107 项
+python3.10 selftest/selftest.py                     # 136 项
 
 # 3) 关 NTP（必须）
 sudo timedatectl set-ntp false
@@ -74,8 +74,8 @@ python3.10 capture/collect_cap.py --cap-side right --no-quest
 Windows：
 
 ```powershell
-cd C:\Users\Andy\Desktop\paxini\Paxini-Cap\Cap_Quest
-& "C:\Users\Andy\AppData\Local\Programs\Python\Python312\python.exe" `
+cd <repo>\Paxini-Cap\Cap_Quest
+python `
   latency\measure_camera_latency_wsl.py --repeat 3
 ```
 
@@ -83,7 +83,7 @@ Ubuntu：
 
 ```bash
 cd <repo>/Paxini-Cap/Cap_Quest
-export PATH="$HOME/bin:$PATH"
+export FFMPEG=/path/to/ffmpeg-5-or-newer
 sudo timedatectl set-ntp false          # pts 走 CLOCK_REALTIME，测完记得开回来
 python3.10 latency/measure_camera_latency.py
 ```
@@ -140,7 +140,7 @@ python3.10 viewer/visualize.py recordings/data_20261113_9 --save-png a.png
 cd Paxini-Cap/Cap_Quest
 python3.10 -m py_compile capture/*.py viewer/*.py selftest/*.py latency/*.py calib/*.py
 python3.10 -m pyflakes  capture/*.py viewer/*.py selftest/*.py latency/*.py calib/*.py
-python3.10 selftest/selftest.py                      # 107 项（加过用例会更多）
+python3.10 selftest/selftest.py                      # 136 项（加过用例会更多）
 ```
 
 三关都过再提交。改过行为或数据结构，`selftest` 必须加用例，不能只靠手跑过一遍。

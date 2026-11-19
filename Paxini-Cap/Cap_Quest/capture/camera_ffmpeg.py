@@ -456,7 +456,6 @@ class FfmpegCamera:
         self.epoch_monotonic_ns: int | None = None
         self.start_monotonic_ns: int | None = None
         self._log_handle = None
-        self._last_progress_frames = 0
         self._epoch_stop = threading.Event()
         self._epoch_thread: threading.Thread | None = None
         # Live preview (display only; nothing here reaches the HDF5).
@@ -690,22 +689,41 @@ class FfmpegCamera:
         with self._preview_lock:
             return self._preview_latest
 
-    def progress_frames(self) -> int:
-        """Return the frame counter from the newest ``-progress`` report."""
+    def progress_signal(self) -> int:
+        """Return a monotonically growing frame-count estimate.
+
+        ffmpeg omits ``frame=`` for some stream-copy paths, even though it
+        still reports ``out_time_us`` and ``total_size``. Readiness checks need
+        evidence that new frames landed, not a specific progress key.
+        """
         try:
             text = self.progress_path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             return 0
         frames = 0
+        out_time_us = 0
+        total_size = 0
         for line in text.splitlines():
             key, _, value = line.partition("=")
-            if key.strip() != "frame":
+            key = key.strip()
+            if key not in ("frame", "out_time_us", "total_size"):
                 continue
             try:
-                frames = int(value.strip())
+                number = int(value.strip())
             except ValueError:
                 continue
-        return frames
+            if key == "frame":
+                frames = number
+            elif key == "out_time_us":
+                out_time_us = number
+            else:
+                total_size = number
+        if frames > 0:
+            return frames
+        if out_time_us > 0:
+            return max(1, int(round(out_time_us * self.fps / 1e6)))
+        # A growing container is enough to prove the input produced a frame.
+        return max(0, total_size // 65536)
 
     def poll_health(self) -> None:
         """Raise if ffmpeg exited while the recording is running."""
@@ -856,7 +874,7 @@ def wait_for_cameras_ready(
     started = time.monotonic()
     deadline = started + timeout_s
     counts = {camera.camera_id: 0 for camera in cameras}
-    last_frames = {camera.camera_id: 0 for camera in cameras}
+    last_progress = {camera.camera_id: 0 for camera in cameras}
     camera_text = "/".join(camera.camera_id for camera in cameras)
     log(
         f"[INFO] 等待 PXCap {camera_text} 摄像头画面；"
@@ -868,9 +886,9 @@ def wait_for_cameras_ready(
             raise RuntimeError("等待 PXCap 摄像头时收到停止信号")
         for camera in cameras:
             camera.poll_health()
-            frames = camera.progress_frames()
-            if frames > last_frames[camera.camera_id]:
-                last_frames[camera.camera_id] = frames
+            progress = camera.progress_signal()
+            if progress > last_progress[camera.camera_id]:
+                last_progress[camera.camera_id] = progress
                 counts[camera.camera_id] += 1
         if all(count >= required_samples for count in counts.values()):
             elapsed = time.monotonic() - started
@@ -882,7 +900,8 @@ def wait_for_cameras_ready(
         time.sleep(PROGRESS_POLL_S)
 
     details = "，".join(
-        f"{camera_id}={frames}" for camera_id, frames in last_frames.items()
+        f"{camera_id}={progress}"
+        for camera_id, progress in last_progress.items()
     )
     raise RuntimeError(
         f"等待 PXCap {camera_text} 摄像头画面超时（已出帧：{details}）。"

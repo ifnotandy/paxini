@@ -5,7 +5,7 @@
 # ---------------------------------------------------------------- 手套
 hand_port: auto          # 串口。auto = 按 USB VID:PID 28e9:018a 自动发现
 hand_rate: 120           # 连续采集请求频率 Hz（1~300）；实测到货 115~118
-cap_side: right          # 手别 left|right；只影响视频文件名与 manifest 标记
+cap_side: left           # 单只手套手别 left|right；决定相机命名与 Quest 默认手别
 
 # ---------------------------------------------------------------- 相机
 camera_mode: both        # both / cam0 / cam1 / none；none 不启动 ffmpeg
@@ -19,7 +19,7 @@ camera_backend: auto     # auto：WSL 判成 wsl、原生 Ubuntu 判成 linux
 
 # ---------------------------------------------------------------- Quest
 pose_source: controller  # controller / hand / head
-pose_side: right         # controller 与 hand 用哪只手
+pose_side: auto          # auto=跟随 cap_side；left/right 可显式覆盖
 quest_rate: 120          # 主机轮询频率 Hz，不是头显推送频率
 no_quest: false          # true = 只采手套与相机，quest 组写 NaN
 
