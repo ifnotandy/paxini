@@ -40,7 +40,14 @@ XRoboToolKit 中开启 **Tracking** 和 **Send**。
 python3.10 capture/collect_cap.py --list-devices
 ```
 
-确认能看到 PXCap、两个 MASTER Camera 和 ffmpeg 7 后，开始正式采集：
+确认能看到 PXCap、两个 MASTER Camera 和 ffmpeg 7 后，先关 NTP，再开始正式采集。
+
+手套和相机的 Unix 时间戳都是墙钟，采集期间被校时 step 改写会让时间轴整体错位
+（本机实测出现过 2~5 秒跳变，详见 [`README.md`](README.md) §2「墙钟跳变」）：
+
+```bash
+sudo timedatectl set-ntp false
+```
 
 ```bash
 python3.10 capture/collect_cap.py \
@@ -61,6 +68,12 @@ python3.10 capture/collect_cap.py \
 三路不再串行等待：相机和 Quest 的就绪检测在采集循环里做，相机超时只让那一路失败，
 Quest 没连上只打警告。所以看到这两行之后，日志里仍可能出现「相机已就绪」或
 「相机就绪检测结束」。
+
+采完把 NTP 开回来：
+
+```bash
+sudo timedatectl set-ntp true
+```
 
 ### 4. 采集后生成可视化
 
