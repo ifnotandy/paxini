@@ -59,6 +59,36 @@
 
 两处都只对组织成员开放，没有对外分发渠道——这是当前的口径，不是遗留缺陷。
 
+## 上传（`tools/upload_modelscope.py`）
+
+打包与上传都走脚本，不要手工拖网页：
+
+```bash
+cd Paxini-Cap
+python tools/upload_modelscope.py                        # 演练：只打包 + 打印门禁，不联网
+python tools/upload_modelscope.py --only data_20261118_1  # 只处理一份
+python tools/upload_modelscope.py --upload                # 真传
+```
+
+- **默认不联网**，`--upload` 才动网；确认无误再加。
+- 门禁读的是 `manifest.json`：`verify.row_mismatch` 必须为空、手套行数 > 0、
+  实际频率在 50~200 Hz、每路相机 `error` 为空且帧数 > 0、`data.h5` 与
+  `cameras/<id>.mkv` 都在。不合格默认跳过并打印原因，`--allow-broken` 才强传。
+- 产物是 `<recordings>/.upload_staging/`：每份一个 `<目录名>.zip`（内部根节点是
+  目录名本身）+ 一份 `SHA256SUMS.txt`（`sha256sum -c` 格式）。zip 用 STORED
+  不压缩——里面是 mkv 和 h5，deflate 只省 2% 却要全程 CPU。
+- 已有的 zip 只要比目录新就复用，`--rebuild` 强制重打。
+- 令牌走 `--token` 或环境变量 `MODELSCOPE_API_TOKEN`
+  （<https://modelscope.cn/my/myaccesstoken>）；两者都没有时用本机
+  `~/.modelscope/` 里的登录态。**令牌不要写进仓库**。
+- 上传只覆盖同名文件，不会删远端已有的 `README.md`（数据集卡片仍手工维护）。
+- 脚本会自己建 staging 目录，不用手工建；`.upload_staging/` 与 `*.zip` 都在
+  `.gitignore` 里。
+
+`modelscope` 只有 `--upload` 那条路需要（`--dry-run` 是纯标准库）。没装就
+`python3.10 -m pip install --user modelscope`，装完记得确认 numpy / h5py 没被连带
+改版本。
+
 ## 新增采集
 
 不需要手动建目录：`collect_cap.py` 会按当天序号自动递增。要指定位置用

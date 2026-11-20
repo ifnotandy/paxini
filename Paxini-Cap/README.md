@@ -31,6 +31,8 @@ Paxini-Cap/
 │   └── camera.py           # 单路相机录 N 秒，ffprobe 回读；复用 camera_ffmpeg.py
 ├── sdk/                # deb 包 + SHA256SUMS + 安装说明（二进制不入库）
 │   ├── xrobotoolkit/       # Quest 端 APK
+├── tools/              # 数据侧工具（不参与采集）
+│   └── upload_modelscope.py   # 打包 data_* 并上传 ModelScope 数据集仓
 ├── requirements.txt
 └── README.md
 ```
