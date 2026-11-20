@@ -1,0 +1,61 @@
+# 相机延迟测量记录 —— 一台机器一个文件，按测量顺序追加，不要手工改序号
+#
+# 文件名   <电脑用户>-ubuntu.yaml   例：ifnot-ubuntu.yaml
+# 序号    同一台机器上的第几次测量，从 1 起递增；cam0 与 cam1 混排，看 camera 字段
+# 结果    median_ms 是推荐使用的 Δ（含显示链路，单位毫秒）
+# 合格    ok: true = 样本 >= 30、IQR <= 40 ms、前后漂移 <= 10 ms
+# 偏差    delta_prev_ms = 与上一次同参数测量的差；超过 20 ms 说明整条链路变了
+#
+# 下游读数
+#   import sys; sys.path.insert(0, "<repo>/Paxini-Cap/Cap_Quest/latency")
+#   from latency_records import load_records, pick_latest
+#   entry = pick_latest(load_records(), camera=0)     # 不给路径 = 本机这份
+#   median = entry["median_ms"]
+#
+machine: ifnot-ubuntu
+platform: ubuntu
+backend: linux
+collect_path: 原生 Ubuntu 采集路径（V4L2）
+host: andy
+created_at: '2026-11-21T00:02:56+08:00'
+updated_at: '2026-11-21T00:03:39+08:00'
+measurements:
+  1:
+    at: '2026-11-21T00:02:56+08:00'
+    camera: 0
+    median_ms: 84.745
+    iqr_ms: 7.268
+    samples: 346
+    ok: true
+    mean_ms: 87.503
+    std_ms: 27.902
+    drift_ms: -1.992
+    detection_rate: 0.473
+    width: 1280
+    height: 720
+    fps: 30
+    codec: copy
+    seconds: 20.0
+    display_latency_ms: 0.0
+    device_name: '/dev/video2  MASTER Camera: MASTER Camera'
+    output_dir: latency_measure/20261121_000141_cam0
+  2:
+    at: '2026-11-21T00:03:39+08:00'
+    camera: 1
+    median_ms: 87.616
+    iqr_ms: 8.288
+    samples: 163
+    ok: true
+    mean_ms: 91.719
+    std_ms: 49.301
+    drift_ms: 1.841
+    detection_rate: 0.252
+    width: 1280
+    height: 720
+    fps: 30
+    codec: copy
+    seconds: 20.0
+    display_latency_ms: 0.0
+    device_name: '/dev/video6  MASTER Camera: MASTER Camera'
+    output_dir: latency_measure/20261121_000141_cam1
+clock_domain: CLOCK_REALTIME（V4L2 墙钟 pts，无 epoch 锚点）
