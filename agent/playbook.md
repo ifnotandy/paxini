@@ -212,6 +212,19 @@ gh release create <名字> --verify-tag --title "..." --notes-file ... <资产..
 
 > 2026-11-20 踩过：`data-sample-20261117` 发布时没带 `--target`，标签落在 `3c42ec5`（PR #8 的 Quest 合并提交），而真正的数据在 `52f63ce`。Release 页面「Source code」下载到的是代码树，一份样例都没有。
 
+### 移动 Release 的标签会把它打回草稿
+
+Release 按标签名关联，所以"改指向"只能删标签再重建。**删标签那一刻 Release 会变成 `draft=true`**，
+重建标签也不会自动恢复——资产对外不可见，`gh release list` 里显示 `Draft`。
+
+```bash
+gh release edit <tag> --draft=false            # 重新发布
+gh release edit <tag> --latest                 # 需要占 Latest 位置时再补一句
+```
+
+> 2026-11-20：修 `data-sample-20261117` 的指向后两个 Release 都成了草稿，
+> `--draft=false` 才恢复。改完必须 `gh release view <tag> --json isDraft,assets` 复核。
+
 ### 名字不要跨命名空间
 
 `refs/tags/archive/wsl-20261120` 和 `refs/heads/archive/wsl-backend` 同属 `archive/`，`git log --decorate` 里混在一起，看图和补全都容易选错。标签用不带斜杠的平铺名：`wsl-backend-archive-20261120`、`data-sample-20261117`、`vendor-binaries-v1.0`。
