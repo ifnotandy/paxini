@@ -20,6 +20,8 @@ Run with ``python3.10 selftest.py``; exit status 0 means every case passed.
 
 from __future__ import annotations
 
+import base64
+
 import json
 import math
 import shutil
@@ -80,7 +82,9 @@ from visualize import (
     collect_payload,
     prepare_videos,
     take_envelope,
+    write_viewer,
 )
+import sensor_layout_schematic as schematic_layout
 
 PASSED: list[str] = []
 FAILED: list[str] = []
@@ -1376,6 +1380,187 @@ def test_visualize(tmp_root: Path) -> None:
     check("可视化/载荷含四路关节角标签", len(payload["cap"]["angle_labels"]) == 4)
 
 
+def test_visualize_distribution(tmp_root: Path) -> None:
+    """Distribution scatter: counts masking, 0.01 N packing, HTML card."""
+    out = tmp_root / "viz_dist"
+    out.mkdir(parents=True, exist_ok=True)
+    count = 12
+    mono = 6_400_000_000_000 + np.arange(count, dtype=np.int64) * 8_333_333
+    unix = 1_700_100_000_000_000_000 + (mono - mono[0])
+    counts = np.zeros((count, len(CAP_SLOTS)), dtype="uint32")
+    counts[:, 0] = 3
+    force = np.zeros((count, len(CAP_SLOTS), CAP_MAX_POINTS, 3), dtype="int16")
+    # frame 0, slot 0: valid points 0..2; point 3 is padding and must be masked.
+    force[0, 0, 0] = (10, 0, 0)    # 1.0 N
+    force[0, 0, 1] = (0, 0, 20)    # 2.0 N
+    force[0, 0, 2] = (0, 0, 0)     # valid, but zero force
+    force[0, 0, 3] = (100, 100, 100)  # padding: must be zeroed by counts
+    with h5py.File(out / "data.h5", "w") as handle:
+        group = handle.create_group("cap")
+        group["timestamp_unix_ns"] = unix
+        group["timestamp_monotonic_ns"] = mono
+        group["joint_angles_deg"] = np.zeros((count, 4))
+        group["resultant_force"] = np.zeros(
+            (count, len(CAP_SLOTS), 3), dtype="int16"
+        )
+        group["distribute_counts"] = counts
+        group["distribute_force"] = force
+
+    payload = collect_payload(out, 4000, 60, False)
+    slot = payload["slot_force"]
+    dist = slot["dist"]
+    check("可视化分布力/载荷存在", dist is not None)
+    if dist is None:
+        return
+    check(
+        "可视化分布力/形状",
+        dist["shape"] == [len(CAP_SLOTS), CAP_MAX_POINTS],
+        str(dist["shape"]),
+    )
+    check(
+        "可视化分布力/槽位容量",
+        dist["capacities"] == [CAP_SLOT_POINTS[s] for s in CAP_SLOTS],
+        str(dist["capacities"]),
+    )
+    points = dist.get("points") or []
+    check(
+        "可视化分布力/点位数量",
+        len(points) == len(CAP_SLOTS)
+        and all(len(points[i]) == CAP_SLOT_POINTS[s] for i, s in enumerate(CAP_SLOTS)),
+        str([len(row) for row in points]),
+    )
+    check(
+        "可视化分布力/点位在画布内",
+        all(0.0 <= x <= 1.0 and 0.0 <= y <= 1.0 for row in points for x, y in row),
+    )
+    raw = base64.b64decode(dist["data"])
+    expected = slot["frames"] * len(CAP_SLOTS) * CAP_MAX_POINTS * 2
+    check("可视化分布力/字节长度", len(raw) == expected, f"{len(raw)} != {expected}")
+    values = np.frombuffer(raw, dtype="<u2").reshape(
+        slot["frames"], len(CAP_SLOTS), CAP_MAX_POINTS
+    )
+    check(
+        "可视化分布力/非零值量化",
+        values[0, 0, 0] == 100 and values[0, 0, 1] == 200,
+        str(values[0, 0, :4]),
+    )
+    check(
+        "可视化分布力/补齐点被清零",
+        values[0, 0, 3] == 0,
+        str(values[0, 0, :5]),
+    )
+    check(
+        "可视化分布力/固定25N色标",
+        dist["scale_n"] == 25.0,
+        str(dist["scale_n"]),
+    )
+
+    tangent = dist.get("tangent")
+    check("可视化分布力/切向数据存在", tangent is not None)
+    if tangent is not None:
+        tbytes = base64.b64decode(tangent)
+        expected_t = slot["frames"] * len(CAP_SLOTS) * CAP_MAX_POINTS * 2
+        check(
+            "可视化分布力/切向字节长度",
+            len(tbytes) == expected_t,
+            f"{len(tbytes)} != {expected_t}",
+        )
+        tvals = np.frombuffer(tbytes, dtype=np.int8).reshape(
+            slot["frames"], len(CAP_SLOTS), CAP_MAX_POINTS, 2
+        )
+        check(
+            "可视化分布力/切向量值",
+            tuple(tvals[0, 0, 0]) == (10, 0)
+            and tuple(tvals[0, 0, 1]) == (0, 0),
+            str(tvals[0, 0, :3]),
+        )
+        check(
+            "可视化分布力/切向补齐点清零",
+            tuple(tvals[0, 0, 3]) == (0, 0),
+            str(tvals[0, 0, :5]),
+        )
+    check(
+        "可视化分布力/旋转列表",
+        dist["rotations"] == [0, 90, 0, 90, 0, 90, 0, 90, 90, 90],
+        str(dist["rotations"]),
+    )
+    check(
+        "可视化分布力/翻转列表",
+        dist["flips"]
+        == ["v", "v", "h", "h", "h", "h", "h", "h", "h", "v"],
+        str(dist["flips"]),
+    )
+    check(
+        "可视化分布力/切向色标",
+        0.9 <= dist["tangent_scale_n"] <= 1.0,
+        str(dist["tangent_scale_n"]),
+    )
+    no_arrows = collect_payload(out, 4000, 60, False, with_dist_arrows=False)
+    check(
+        "可视化分布力/关闭箭头时无切向数据",
+        no_arrows["slot_force"]["dist"]["tangent"] is None,
+    )
+
+    html_path = out / "viewer.html"
+    write_viewer(payload, html_path)
+    html = html_path.read_text(encoding="utf-8")
+    check(
+        "可视化分布力/HTML 含卡片",
+        'id="distCard"' in html and 'id="distCanvas"' in html,
+    )
+    check("可视化分布力/HTML payload 已替换", "__PAYLOAD__" not in html)
+
+    omitted = tmp_root / "viz_dist_omitted"
+    omitted.mkdir(parents=True, exist_ok=True)
+    with h5py.File(omitted / "data.h5", "w") as handle:
+        group = handle.create_group("cap")
+        group["timestamp_unix_ns"] = unix
+        group["timestamp_monotonic_ns"] = mono
+        group["joint_angles_deg"] = np.zeros((count, 4))
+        group["resultant_force"] = np.zeros(
+            (count, len(CAP_SLOTS), 3), dtype="int16"
+        )
+        group["distribute_counts"] = counts
+    omitted_payload = collect_payload(omitted, 4000, 60, False)
+    omitted_dist = omitted_payload["slot_force"]["dist"]
+    check("可视化分布力/omit 时无 dist", omitted_dist is None)
+    check(
+        "可视化分布力/omit 时给出警告",
+        any("分布力" in text for text in omitted_payload["warnings"]),
+        str(omitted_payload["warnings"]),
+    )
+
+
+def test_schematic_layout() -> None:
+    """Fallback layout: counts, bounds, and the real 119-pad length."""
+    points = schematic_layout.build_dist_points()
+    check(
+        "示意布局/点位数量",
+        [len(row) for row in points] == [49, 20, 49, 20, 49, 20, 49, 20,
+                                         119, 49],
+        str([len(row) for row in points]),
+    )
+    check(
+        "示意布局/坐标在画布内",
+        all(0.0 <= x <= 1.0 and 0.0 <= y <= 1.0 for row in points for x, y in row),
+    )
+    xs = [p[0] for p in points[8]]
+    ys = [p[1] for p in points[8]]
+    width = max(xs) - min(xs)
+    height = max(ys) - min(ys)
+    long_side, short_side = max(width, height), min(width, height)
+    check(
+        "示意布局/119长条长度与真实模型一致",
+        0.50 <= long_side <= 0.53,
+        f"{width:.4f} x {height:.4f}",
+    )
+    check(
+        "示意布局/119长条保持长宽比",
+        long_side / short_side >= 2.5,
+        f"{long_side / short_side:.2f}",
+    )
+
+
 def test_quest_view(tmp_root: Path) -> None:
     """Quest payload keeps its SDK axis and never invents source alignment."""
     path = tmp_root / "quest_view.h5"
@@ -1703,6 +1888,8 @@ def main() -> int:
         else:
             skip("相机命令 / 相机预览", "本机找不到 ffprobe（这两组验的是 ffmpeg 命令拼装，需要在装好 ffmpeg+ffprobe 的环境跑）")
         run_case("可视化", test_visualize, tmp_root)
+        run_case("可视化分布力", test_visualize_distribution, tmp_root)
+        run_case("示意布局", test_schematic_layout)
         run_case("Quest 可视化", test_quest_view, tmp_root)
         run_case("C8 时钟探针", test_clock_probe_report)
         run_case("可视化视频", test_visualize_video, tmp_root)

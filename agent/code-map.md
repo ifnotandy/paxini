@@ -39,6 +39,7 @@
 | 回放窗口 | `viewer/visualize.py` | `collect_payload()`(:380) → `run_window()`(:549) / `write_viewer()`(:966) | `--save-png` 出一张 |
 | Quest 回放 payload | `viewer/quest_view.py` | `load_quest_view()`(:161)、`load_clock_report()`(:115)、`take_evenly()`(:26) | `selftest` 的 "Quest 可视化"；默认独立轴，C8 通过才可 `sdk_unix` |
 | 回放视频预览 | `viewer/visualize.py` | `build_preview()`(:302) | `selftest` 的 "视频" 组 |
+| 分布力空间散点图 | `viewer/visualize.py` + `viewer/sensor_layout_schematic.py` | `build_slot_force()` 的 `dist`、`drawDistribution()`；无本地 Studio 模型时用示意网格，切向箭头用 `dist.tangent` | `selftest` 的 "可视化分布力" / "示意布局" 组 |
 | 实时视图 | `viewer/live_view.py` | `HtmlLiveView`(:773) / `LiveView`(:920) | `--view` 起一次 |
 | 手套零点标定 | `calib/hand_calib.py` | `check_*_gate`、子命令 `encoder`/`sensor`/`magnet` | `calib/hand_calib.py selftest`（7 项） |
 | 相机延迟测量（V4L2） | `latency/measure_camera_latency.py` | 整份，复用 `FfmpegCamera`；默认逐路测 cam0/cam1 | 跑一次看 IQR 与前后半段漂移 |

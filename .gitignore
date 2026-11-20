@@ -50,6 +50,10 @@ sdk/**/*.tar.gz
 # ---------- 大体积构建日志 ----------
 **/export.log
 
+# ---------- 本地厂商测点模型（UNLICENSED，不入库）----------
+# 公共回退是 viewer/sensor_layout_schematic.py
+Paxini-Cap/Cap_Quest/viewer/sensor_layout.py
+
 # ---------- Python ----------
 __pycache__/
 *.py[cod]
