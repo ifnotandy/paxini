@@ -53,6 +53,8 @@ def make_recording(
     cam_seconds: float = 4.5,
     with_mono: bool = True,
     with_cam1: bool = False,
+    cam1_offset_s: float | None = None,
+    cam1_seconds: float | None = None,
     t0_ns: int = 1_700_000_000_000_000_000,
     libver: str = "earliest",
 ) -> Path:
@@ -87,7 +89,19 @@ def make_recording(
         cap.create_dataset("distribute_counts", data=counts)
 
         cams = f.create_group("cameras")
-        for slot, series in (("right_cam0", cam_t), ("right_cam1", cam_t + 15_000_000)):
+        # cam1 默认比 cam0 晚 15 ms（同一次开机两路 UVC 的真实情形）；需要
+        # 起停不同的用例用 cam1_offset_s / cam1_seconds 单独给窗口。
+        cam1_t = cam_t + 15_000_000
+        if cam1_offset_s is not None or cam1_seconds is not None:
+            offset = cam_offset_s if cam1_offset_s is None else cam1_offset_s
+            seconds_1 = cam_seconds if cam1_seconds is None else cam1_seconds
+            m1 = int(seconds_1 * cam_rate)
+            cam1_t = (
+                t0_ns
+                + int(offset * 1e9)
+                + np.arange(m1, dtype=np.int64) * cam_dt
+            )
+        for slot, series in (("right_cam0", cam_t), ("right_cam1", cam1_t)):
             if slot == "right_cam1" and not with_cam1:
                 continue
             group = cams.create_group(slot)
@@ -106,10 +120,18 @@ def add_quest(
     rate: float = 120.0,
     start_s: float = 0.0,
     seconds: float = 4.5,
+    gap_s: tuple[float, float] | None = None,
 ) -> None:
     rows = int(seconds * rate)
     dt = int(1e9 / rate)
     sdk = t0_ns + int(start_s * 1e9) + np.arange(rows, dtype=np.int64) * dt
+    if gap_s is not None:
+        # 中间挖一段空档：模拟 Quest 掉样本。掉样本的位置在窗口内，所以
+        # 「保留该行但标 valid=false」这条语义才有东西可验。
+        gap_first = t0_ns + int(gap_s[0] * 1e9)
+        gap_last = t0_ns + int(gap_s[1] * 1e9)
+        sdk = sdk[(sdk < gap_first) | (sdk >= gap_last)]
+    rows = int(sdk.size)
     sequence = np.arange(100, 100 + rows, dtype=np.int32)
     pose = np.zeros((rows, 7), dtype=np.float64)
     pose[:, 0] = (sdk - t0_ns) / 1e9
@@ -239,6 +261,113 @@ def test_keep_outside(tmp: Path) -> None:
     check("--keep-outside 保留全部相机帧",
           int(result["aligned_rows"]) == int(result["camera_rows"]),
           f"{result['aligned_rows']} 行")
+
+
+def _window_counts(result: dict) -> int:
+    return (
+        int(result["dropped_by_glove"])
+        + sum(int(value) for value in result["dropped_by_camera"].values())
+        + int(result["dropped_by_quest"])
+    )
+
+
+def test_window_second_camera_late(tmp: Path) -> None:
+    """第二路相机晚开始：主轴被它自己的窗口裁掉，并按来源单独记账。"""
+    rec = make_recording(tmp, with_cam1=True, cam1_offset_s=1.0, cam1_seconds=2.0)
+    result = run(rec, reference="right_cam0")
+    window = result["windows"]["camera:right_cam1"]
+    master = result["timestamp_ns"]
+    expect = int(
+        np.count_nonzero(
+            (master >= window["first_timestamp_ns"])
+            & (master <= window["last_timestamp_ns"])
+        )
+    )
+    inside = bool(
+        np.all(
+            (master >= window["first_timestamp_ns"])
+            & (master <= window["last_timestamp_ns"])
+        )
+    )
+    check(
+        "第二条相机晚开始时主轴按公共窗口裁剪",
+        inside and int(result["aligned_rows"]) == expect
+        and int(result["dropped_by_camera"]["right_cam1"]) > 0,
+        f"保留 {result['aligned_rows']}（手算 {expect}），"
+        f"cam1 丢弃 {result['dropped_by_camera']['right_cam1']}",
+    )
+    check(
+        "丢弃计数按来源相加等于总丢弃数",
+        _window_counts(result) == int(result["dropped_outside"]),
+        f"{_window_counts(result)} vs {result['dropped_outside']}",
+    )
+
+
+def test_window_second_camera_early_end(tmp: Path) -> None:
+    """第二路相机早结束：末尾的行同样按它自己的窗口裁掉。"""
+    rec = make_recording(tmp, with_cam1=True, cam1_offset_s=-0.5, cam1_seconds=2.0)
+    result = run(rec, reference="right_cam0")
+    window = result["windows"]["camera:right_cam1"]
+    master = result["timestamp_ns"]
+    last_kept = int(master[-1])
+    check(
+        "第二条相机早结束时末尾行被裁掉",
+        last_kept <= window["last_timestamp_ns"]
+        and int(result["dropped_by_camera"]["right_cam1"]) > 0,
+        f"末行 {last_kept}，cam1 末帧 {window['last_timestamp_ns']}，"
+        f"丢弃 {result['dropped_by_camera']['right_cam1']}",
+    )
+
+
+def test_window_camera_boundary_uses_delay(tmp: Path) -> None:
+    """相机窗口边界必须减同一个 Δ，否则窗口整体晚 Δ。"""
+    rec = make_recording(tmp, with_cam1=True, cam1_offset_s=0.0, cam1_seconds=4.0)
+    delay_ms = 120.0
+    result = run(rec, reference="right_cam0", delay_ms=delay_ms)
+    delay_ns = int(round(delay_ms * 1e6))
+    key = (
+        "timestamp_monotonic_ns"
+        if result["timebase"] == "mono"
+        else "timestamp_unix_ns"
+    )
+    with h5py.File(rec / "data.h5", "r") as f:
+        raw_first = int(f["cameras/right_cam1"][key][0])
+    window = result["windows"]["camera:right_cam1"]
+    check(
+        "相机有效窗口 = 首末戳 − Δ",
+        window["first_timestamp_ns"] == raw_first - delay_ns,
+        f"{window['first_timestamp_ns']} vs {raw_first - delay_ns}",
+    )
+
+
+def test_windows_in_summary(tmp: Path) -> None:
+    rec = make_recording(tmp)
+    result = run(rec)
+    path = ac.write_aligned(result, tmp / "out")
+    with h5py.File(path) as f:
+        summary = json.loads(f.attrs["summary"])
+    ok = (
+        "valid_windows" in summary
+        and "kept_rows" in summary
+        and "dropped_by_camera" in summary
+        and "dropped_by_glove" in summary
+        and "dropped_by_quest" in summary
+        and "dropped_outside_overlap" in summary
+        and summary["kept_rows"] == summary["rows"]
+        and "glove" in summary["valid_windows"]
+    )
+    check("summary 记录公共窗口与按来源丢弃计数（旧字段保留）", ok, list(summary)[:6])
+
+
+def test_windows_no_overlap(tmp: Path) -> None:
+    """四路窗口完全不重叠时必须报错，不能产出一个 0 行的文件。"""
+    rec = make_recording(tmp, cam_offset_s=-10.0)
+    try:
+        run(rec)
+    except ac.AlignError as exc:
+        check("公共窗口为空时明确报错", "公共有效窗口" in str(exc), str(exc)[:48])
+    else:
+        check("公共窗口为空时明确报错", False, "没有抛错")
 
 
 def test_nearest_integer(tmp: Path) -> None:
@@ -380,7 +509,9 @@ def test_quest_clock_model_inverse(tmp: Path) -> None:
 
 def test_quest_missing_semantics(tmp: Path) -> None:
     rec = make_recording(tmp)
-    add_quest(rec, start_s=0.1)
+    # 窗口内部的 0.5 s 空档：这些行在 Quest 有效区间之内，配不到刚发生的样本，
+    # 必须保留下来并标 valid=false，不能整行丢掉。
+    add_quest(rec, gap_s=(1.5, 2.0))
     report, digest = make_clock_report(rec)
     result = run(
         rec,
@@ -460,7 +591,9 @@ def test_quest_file_quality_gate(tmp: Path) -> None:
 
 def test_quest_coverage_gate(tmp: Path) -> None:
     rec = make_recording(tmp)
-    add_quest(rec, start_s=0.025, seconds=2.0)
+    # 10 Hz 的 Quest：覆盖整段窗口，但样本太稀，大部分行配不到 25 ms 内的样本。
+    # 这是窗口过滤之后仍然有意义的「覆盖不足」——不是靠起止时间凑出来的。
+    add_quest(rec, rate=10.0, seconds=4.5)
     report, digest = make_clock_report(rec)
     result = run(
         rec,
@@ -632,6 +765,9 @@ def main() -> int:
     try:
         tests = [
             test_linear_exactness, test_delay_applied, test_outside_dropped, test_keep_outside,
+            test_window_second_camera_late, test_window_second_camera_early_end,
+            test_window_camera_boundary_uses_delay, test_windows_in_summary,
+            test_windows_no_overlap,
             test_nearest_integer, test_counts_nearest, test_omit_distribution,
             test_timebase_fallback, test_multi_camera_views, test_write_and_reopen,
             test_gates_pass, test_rejects_unsorted, test_write_flag_repair, test_lookup3_vector,

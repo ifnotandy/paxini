@@ -44,7 +44,10 @@ except ImportError:  # pragma: no cover - environment guard
 
 
 ALIGNED_FORMAT_VERSION = 2
-DEFAULT_DELAY_MS = 192.3
+#: 台账缺失时的兜底值。必须是 0，不能是某个历史实测数：192.3 ms 是旧 Windows
+#: 采集路径的读数，V4L2 路径上没有任何依据，套用它会让时间轴整体偏 100+ ms，
+#: 而产物每一列看起来都正常。
+DEFAULT_DELAY_MS = 0.0
 QUEST_ALIGNMENT_NONE = "none"
 QUEST_ALIGNMENT_SDK_UNIX = "sdk_unix"
 QUEST_ALIGNMENT_CHOICES = (QUEST_ALIGNMENT_NONE, QUEST_ALIGNMENT_SDK_UNIX)
@@ -311,10 +314,12 @@ def detect_clock_jumps(unix_ns: np.ndarray, mono_ns: np.ndarray, threshold_ns: i
 
 
 def resolve_delay(explicit: float | None, disabled: bool) -> tuple[float, str]:
-    """Return (delta_ms, source). Ledger first, documented default second.
+    """Return (delta_ms, source). Ledger first, then "uncalibrated, zero".
 
-    cam1 was never measured on this machine; project decision (2026-11-17) is to
-    reuse the cam0 value for every camera rather than leave cam1 uncorrected.
+    The fallback used to be 192.3 ms — one machine's Windows-path measurement.
+    On the native V4L2 path that number has no basis and biases the whole time
+    axis by 100+ ms while every column still looks healthy, so the fallback is
+    now 0 and it says so loudly.
     """
     if disabled:
         return 0.0, "disabled (--no-delay)"
@@ -329,10 +334,15 @@ def resolve_delay(explicit: float | None, disabled: bool) -> tuple[float, str]:
             return float(entry["median_ms"]), (
                 f"latency/records 台账 cam0 @{entry.get('at', '')}，两路共用同一值（cam1 未单独测）"
             )
-        warn("台账里没有 cam0 的合格记录，退回内置默认值")
+        detail = "台账里没有 cam0 的合格记录"
     except Exception as exc:  # missing PyYAML, missing file, whatever
-        warn(f"读不到延迟台账（{exc.__class__.__name__}: {exc}），退回内置默认值")
-    return DEFAULT_DELAY_MS, f"内置默认值 {DEFAULT_DELAY_MS} ms（台账不可用）"
+        detail = f"读不到延迟台账（{exc.__class__.__name__}: {exc}）"
+    warn(
+        f"{detail}：本次按**未标定**处理，Δ=0，时间轴不做延迟补偿。"
+        "先跑 Cap_Quest/latency/measure_camera_latency.py，或用 --delay-ms 显式给值；"
+        "带 Δ 采集与非带 Δ 采集的产物不能混着训练"
+    )
+    return DEFAULT_DELAY_MS, "未标定 Δ=0（台账不可用，未做延迟补偿）"
 
 
 # ---------------------------------------------------------------------------
@@ -530,6 +540,29 @@ def align_quest_to_targets(
     }
 
 
+def quest_valid_window(
+    handle: Any, clock_report: dict[str, Any] | None
+) -> tuple[int, int] | None:
+    """First/last host-Unix instant covered by a *valid* Quest stamp.
+
+    Only meaningful after C8: the SDK stamps have to be mapped through the
+    reported clock model before they can be compared with the camera grid.
+    """
+    if clock_report is None or "quest/sdk_timestamp_ns" not in handle:
+        return None
+    model = (clock_report.get("models") or {}).get("host_unix")
+    if not isinstance(model, dict):
+        return None
+    raw = np.asarray(handle["quest/sdk_timestamp_ns"][:], dtype=np.int64)
+    valid = raw[raw > 0]
+    if valid.size == 0:
+        return None
+    mapped = sdk_unix_to_host_unix_ns(valid, model)
+    if mapped.size == 0:
+        return None
+    return int(mapped.min()), int(mapped.max())
+
+
 def align_recording(
     recording: Path,
     reference: str | None,
@@ -620,19 +653,64 @@ def align_recording(
         master_t = reference_t - delay_ns
         master_unix_t = reference_unix - delay_ns
 
-        inside = (master_t >= glove_t[0]) & (master_t <= glove_t[-1])
-        dropped = int(inside.size - np.count_nonzero(inside))
+        # 公共有效窗口：每一路只覆盖它自己确实有数据的那一段，主轴取它们的交集。
+        # 相机戳是「到达时刻」，主轴已经减过 Δ，所以每路相机的窗口边界也必须减
+        # 同一个 Δ，否则窗口整体晚 Δ，要么丢掉最早的几十帧，要么留下没有图像的帧。
+        # 计数是增量式的（手套 → 各相机 → Quest），所以各项相加正好等于总丢弃数；
+        # 一行只算给第一个排除它的来源。
+        windows: dict[str, dict[str, int]] = {}
+        keep = np.ones(master_t.size, dtype=bool)
+
+        windows["glove"] = {
+            "first_timestamp_ns": int(glove_t[0]),
+            "last_timestamp_ns": int(glove_t[-1]),
+        }
+        glove_ok = (master_t >= glove_t[0]) & (master_t <= glove_t[-1])
+        dropped_by_glove = int(np.count_nonzero(keep & ~glove_ok))
+        keep &= glove_ok
+
+        dropped_by_camera: dict[str, int] = {}
+        for slot in slots:
+            first_ns = int(cam_times[slot][0]) - delay_ns
+            last_ns = int(cam_times[slot][-1]) - delay_ns
+            windows[f"camera:{slot}"] = {
+                "first_timestamp_ns": first_ns,
+                "last_timestamp_ns": last_ns,
+            }
+            camera_ok = (master_t >= first_ns) & (master_t <= last_ns)
+            dropped_by_camera[slot] = int(np.count_nonzero(keep & ~camera_ok))
+            keep &= camera_ok
+
+        dropped_by_quest = 0
+        if quest_alignment == QUEST_ALIGNMENT_SDK_UNIX:
+            quest_window = quest_valid_window(handle, quest_clock_report)
+            if quest_window is not None:
+                windows["quest"] = {
+                    "first_timestamp_ns": quest_window[0],
+                    "last_timestamp_ns": quest_window[1],
+                }
+                quest_ok = (master_unix_t >= quest_window[0]) & (
+                    master_unix_t <= quest_window[1]
+                )
+                dropped_by_quest = int(np.count_nonzero(keep & ~quest_ok))
+                keep &= quest_ok
+
+        dropped = int(keep.size - np.count_nonzero(keep))
         if not keep_outside:
-            master_t = master_t[inside]
-            master_unix_t = master_unix_t[inside]
-            ref_raw = reference_t[inside]
-            ref_index = np.flatnonzero(inside).astype(np.int32)
+            master_t = master_t[keep]
+            master_unix_t = master_unix_t[keep]
+            ref_raw = reference_t[keep]
+            ref_index = np.flatnonzero(keep).astype(np.int32)
         else:
             ref_raw = reference_t
             ref_index = np.arange(reference_t.size, dtype=np.int32)
 
         if master_t.size == 0:
-            raise AlignError("相机帧全部落在手套覆盖范围外，无法对齐（两次采集没重叠）")
+            raise AlignError(
+                "四路（参考相机/其他相机/手套/Quest）的公共有效窗口是空的，"
+                "没有一行能对齐（两次采集没有重叠，或 Quest 有效区间与相机不重叠）。"
+                f"各路窗口：{json.dumps(windows, ensure_ascii=False)}"
+            )
 
         left, right, w = bracket_indices(glove_t, master_t)
 
@@ -714,6 +792,10 @@ def align_recording(
         "camera_rows": int(reference_t.size),
         "aligned_rows": int(master_t.size),
         "dropped_outside": dropped,
+        "windows": windows,
+        "dropped_by_glove": dropped_by_glove,
+        "dropped_by_camera": dropped_by_camera,
+        "dropped_by_quest": dropped_by_quest,
         "clock_jumps": jumps,
         "holes": holes,
         "state": state,
@@ -942,12 +1024,18 @@ def aligned_summary(result: dict[str, Any]) -> dict[str, Any]:
         "reference_camera": result["reference"],
         "timebase": result["timebase"],
         "camera_delay_ms": result["delay_ms"],
+        "camera_delay_source": result.get("delay_source"),
         "rows": result["aligned_rows"],
+        "kept_rows": result["aligned_rows"],
         "source_rows": {
             "glove": result["glove_rows"],
             "camera": result["camera_rows"],
         },
         "dropped_outside_overlap": result["dropped_outside"],
+        "dropped_by_glove": result.get("dropped_by_glove", 0),
+        "dropped_by_camera": result.get("dropped_by_camera", {}),
+        "dropped_by_quest": result.get("dropped_by_quest", 0),
+        "valid_windows": result.get("windows", {}),
         "interpolated_rows": interpolated,
         "glove_span_ms": {
             "median": round(float(np.median(span)), 3),
@@ -973,7 +1061,17 @@ def report(result: dict[str, Any], path: Path | None, delay_source: str) -> None
     log(f"  延迟补偿：-{result['delay_ms']:.1f} ms，来源 {delay_source}")
     log(f"  手套 {result['glove_rows']} 帧 → 相机 {result['camera_rows']} 帧 → 对齐 {result['aligned_rows']} 行")
     if result["dropped_outside"]:
-        log(f"  丢弃覆盖范围外 {result['dropped_outside']} 帧（相机与手套起停不同步）")
+        parts = [f"手套 {result.get('dropped_by_glove', 0)}"]
+        parts += [
+            f"{slot} {count}"
+            for slot, count in (result.get("dropped_by_camera") or {}).items()
+        ]
+        if result.get("dropped_by_quest"):
+            parts.append(f"Quest {result['dropped_by_quest']}")
+        log(
+            f"  丢弃公共窗口外 {result['dropped_outside']} 帧"
+            f"（按来源：{'，'.join(parts)}）"
+        )
     log("  插值跨度 median {:.2f} ms / p95 {:.2f} ms / max {:.2f} ms".format(
         span_stats["median"], span_stats["p95"], span_stats["max"]))
     ratio = summary["interpolated_rows"] / max(result["aligned_rows"], 1)
@@ -1161,6 +1259,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 quest_max_age_ms=args.quest_max_age_ms,
                 quest_min_valid_fraction=args.quest_min_valid_fraction,
             )
+            # Δ 的来源要进产物，否则三个月后没人知道这份 aligned 是拿什么数
+            # 修的时间轴（0 = 未标定）。
+            result["delay_source"] = delay_source
             out_dir = (
                 Path(args.output).expanduser().resolve()
                 if args.output
