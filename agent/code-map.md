@@ -12,7 +12,7 @@
 | 改 `quest/` 的列 | `capture/collect_cap.py` | `_quest_layout()`(:643) | `selftest` 的 "Quest 行" 组 |
 | 加命令行参数 | `capture/collect_cap.py` | `build_parser()`(:1344) | `--help` 对照 + 补 `cap_config.yaml` |
 | 改配置加载/优先级 | `capture/collect_cap.py` | `load_config_file()`(:1727)、`apply_config()`(:1756) | `selftest` 的 "配置" 组 |
-| 改采集输出位置 | `capture/collect_cap.py` + `scripts/run_capture_noquest.sh` | `DEFAULT_OUTPUT_ROOT`(:91) 与脚本里的 `RECORDINGS_ROOT` | **两处必须同时改**；改完 `--help` 看默认值，再跑脚本确认摘要找到新目录 |
+| 改采集输出位置 | `capture/collect_cap.py` | `DEFAULT_OUTPUT_ROOT`(:91) | `--help` 看默认值，跑一次采集确认目录落在新位置；`Paxini-Align` 的批量默认路径是 `../Recordings`，挪了要一起说 |
 | 单只手套左右手选择 | `capture/collect_cap.py` | `HAND_SIDES`、`build_parser()`、`resolve_pose_side()`(:1622)、`main()` | `selftest` 的 "手别选择" 组 |
 | 启动失败诊断 | `capture/collect_cap.py` | `write_startup_failure()`(:1660)、`main()` 的 `finally` | `selftest` 的 "启动失败工件" 组 |
 | 采集主循环节拍 | `capture/collect_cap.py` | `pump_and_record()`(:2073) | 跑一次采集看 `manifest.row_mismatch` |

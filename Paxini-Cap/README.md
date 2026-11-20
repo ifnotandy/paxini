@@ -13,7 +13,6 @@ Paxini-Cap/
 │   ├── viewer/             # 回放与实时视图
 │   ├── diagnostics/        # Quest 时间戳时钟域探针（不写 data.h5）
 │   ├── selftest/           # 不接硬件的自检（项数以运行输出为准）
-│   ├── scripts/            # 一键采集脚本
 │   └── cap_config.yaml     # 可选配置（存在即加载，命令行优先）
 ├── Recordings/         # 采集输出（data_<日期>_<序号>/），采集端与 Paxini-Align 共用
 ├── Paxini-Align/       # 下游：手套 + 可选 Quest 按相机帧时刻对齐（→ README）
@@ -217,7 +216,7 @@ python3.10 -m pip install --user -r requirements.txt
 
 装完先跑 §0.4 的三关：`selftest` 全过说明环境没问题，此时不需要插硬件。
 
-**验证设备与日常运行不在本文档**：`--list-devices`、采集、`--view`、一键脚本、回放、
+**验证设备与日常运行不在本文档**：`--list-devices`、采集、`--view`、回放、
 参数表全在 [`Cap_Quest/README.md` §1](Cap_Quest/README.md)。采前关 NTP、
 `export FFMPEG=/path/to/ffmpeg-5-or-newer`、没有头显加 `--no-quest` 这三条纪律，在该文件的
 【快速开始】与【§2 时间戳】里各有完整说明，这里不再重列。

@@ -39,7 +39,6 @@ ffmpeg 让每帧 pts 直接取主机墙钟并原样写进容器，停止后用 `
 | `viewer/` | 可视化 | `visualize.py`（回放）、`quest_view.py`（Quest payload）、`live_view.py`（实时） |
 | `diagnostics/` | 时钟域诊断 | `quest_clock_probe.py`（C8 探针；产物落 `clock_probe/`） |
 | `selftest/` | 不接硬件的自检 | `selftest.py` |
-| `scripts/` | 一键脚本 | `run_capture_noquest.sh` |
 | `cap_config.yaml` | 采集配置，采集 / 延时测量 / 标定三处共用 | — |
 | `QUICKSTART.md` | 当前机器的 XRoboToolKit 联合采集快速上手 | — |
 
@@ -48,8 +47,7 @@ ffmpeg 让每帧 pts 直接取主机墙钟并原样写进容器，停止后用 `
 
 跨目录依赖靠各脚本开头的 `sys.path` 注入解决：`viewer/`、`selftest/`、`latency/`
 都会把 `capture/` 加进搜索路径。`calib/` 只依赖 SDK，不引用采集模块，跟 `capture/`
-没有耦合。`scripts/run_capture_noquest.sh` 自己 `cd` 到 `capture/`，它内部的路径都
-相对脚本位置解析，从哪个目录调用都行。
+没有耦合。所以所有命令都在本目录（`Cap_Quest/`）下执行，不需要 `cd` 到子目录。
 
 ## 1. 快速开始
 
@@ -111,26 +109,24 @@ Quest      可选。PC Service / ADB / 轮询起不来只告警，继续采手�
 `startup_failure.json`，同时保留 `cameras/*.log`、完整 ffmpeg 命令和日志末尾；
 不会生成伪造 HDF5。若 `--output-dir` 原本已存在，诊断写到旁边的新目录，不污染旧数据。
 
-#### 一键脚本（无 Quest 版）
+#### 没有一键脚本（2026-11-20 起）
 
-`run_capture_noquest.sh` 把「找 ffmpeg → 查串口 → 关 NTP → 起采集 → 读 manifest
-核对行数」串成一条命令，**固定带 `--no-quest`**，只适用于"手套 + 双路相机、没有头显"
-的场景。有头显时仍直接跑 `collect_cap.py`。
+原来有一份 `scripts/run_capture_noquest.sh`，把「找 ffmpeg → 查串口 → 关 NTP → 起采集 →
+读 manifest 核对行数」串成一条命令。2026-11-20 删除：它维护的东西（ffmpeg 位置、设备节点、
+参数拼装）与 `collect_cap.py --help` 完全重复，而且三源解耦之后启动条件不再是「先查齐再跑」，
+脚本那套前置检查反而会挡住合法的部分采集（比如只接一路相机）。
+
+现在就是三条命令，顺序别改：
 
 ```bash
-bash scripts/run_capture_noquest.sh                  # 一直采，Ctrl+C 停（只按一次）
-bash scripts/run_capture_noquest.sh -d 60            # 采 60 秒
-bash scripts/run_capture_noquest.sh -d 60 --view     # 边采边看
-bash scripts/run_capture_noquest.sh -d 10 --dry-run  # 只做检查并打印命令，不启动
-bash scripts/run_capture_noquest.sh -- --video-codec h264   # 其余参数写在 -- 之后透传
+export FFMPEG=/path/to/ffmpeg-5-or-newer
+sudo timedatectl set-ntp false
+python3.10 capture/collect_cap.py --no-quest          # 没有头显时
 ```
 
-它比手工敲多了三层保护：找不到 `python3.10`/`PXCap3`、找不到 `ffmpeg` 或 `ffprobe`、
-看不到手套串口或 `/dev/video*` 节点，都会在启动前停下并给出该输入的命令；跑完自动打印
-帧数、实际帧率、视频体积与 `verify.row_mismatch`，校验不过退出码为 3（区别于环境问题的 2）。
-
-脚本不写个人目录：ffmpeg 按 `$FFMPEG`、`PATH`、`/usr/local/bin` 等常见位置查找；
-找到后把它的目录加到 `PATH` 最前面，`ffprobe` 优先取同目录的那份。
+要采固定时长加 `--duration 60`，要边采边看加 `--view`，其余参数一律以 `--help` 为准。
+采完怎么判合格（行数、`row_mismatch`、每路帧数、视频体积）见 §4 与 `../QUICKSTART.md` 的
+「合格检查」。
 
 #### 换一台机器要改什么
 
