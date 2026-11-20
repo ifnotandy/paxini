@@ -44,11 +44,19 @@
 
 数据本体不进 git，通过下面两处获取（2026-11-20 起）：
 
-- ModelScope 数据集：`（待补链接）`
+- ModelScope 数据集（2026-11-20 已上传，**当前仍是私有仓**）：
+  <https://www.modelscope.cn/datasets/yanglab/paxini>
+
+  内容：`data_20261117_{1,2,3}.zip` + `SHA256SUMS.txt` + `README.md`（数据集卡片）。
+  三份 zip 已回读校验：`sha256sum -c SHA256SUMS.txt` 三个 `OK`，且与本地原件逐字节相同。
+
+  注意：仓库私有，匿名访问返回 404，「匿名下载」这条验收**尚未满足**。要对外分发必须先
+  把仓改成公开（`update_dataset("yanglab/paxini", visibility=5)`，或网页端设置），公开后
+  链接才能被非成员下载。
 - GitHub Release（只放 20261117 三份样例的 zip，tag 指向数据源提交 `52f63ce`）：
   <https://github.com/yang-robotics/paxini/releases/tag/data-sample-20261117>
 
-仓库是私有的，Release 资产只有组织成员能下；对外分发走 ModelScope 那条。
+两处都受权限控制，当前对外分发都还没打通。
 
 ## 新增采集
 
