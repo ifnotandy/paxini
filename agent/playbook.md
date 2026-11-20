@@ -136,6 +136,7 @@ python3.10 selftest/selftest.py                      # 全过（项数以运行�
 ```
 
 三关都过再提交。改过行为或数据结构，`selftest` 必须加用例，不能只靠手跑过一遍。
+进 main 的流程（PR、冲突用 merge 而不是 rebase）见 §9。
 
 ## 8. 判断一个改动安不安全
 
@@ -149,3 +150,49 @@ python3.10 selftest/selftest.py                      # 全过（项数以运行�
 5. **它改的是不是 `DOC/HDF5结构说明.md`？** → 整份重写会覆盖用户手动编辑的内容
 
 五条都过了，再动手。
+
+## 9. 改动怎么进 main（PR 与冲突处理）
+
+**默认走 PR，不直接推 main。** 只有一两行的紧急修补（版本号、错别字、注释）才直接推。
+
+```bash
+git switch main && git pull                     # 起点必须是当前 main
+git switch -c feature/<短描述>
+# 改代码、按 §7 过三关、commit
+git push -u origin feature/<短描述>              # 推的是分支
+gh pr create --fill                              # 用提交信息当标题正文
+gh pr view --json mergeable,mergeStateStatus     # 看能不能合
+gh pr merge --squash --delete-branch             # 服务端合并
+git switch main && git pull                      # 本地同步
+```
+
+### 冲突怎么解：把 main 合进你的分支，不要 rebase
+
+PR 显示 `CONFLICTING` / merge 按钮变灰时：
+
+```bash
+git fetch origin
+git switch feature/<短描述>
+git merge origin/main            # 冲突在这一步出现
+# 打开冲突文件，改掉 <<<<<<< ======= >>>>>>> 三段
+git add <改过的文件>
+git commit                       # merge 会自己带默认信息，直接用
+git push                         # 普通 push，不需要 force
+```
+
+PR 页面会自动重算，状态条变回可合。
+
+**为什么不用 `rebase origin/main`：**
+
+1. **冲突要解多次**。rebase 逐个提交重放，5 个提交碰同一个文件就可能撞 5 次；merge 只在合并点撞一次。
+2. **force-push 会让 review 记录失效**。评论绑在 commit + 行号上，改写后变成 outdated。
+3. **别人基于你分支干活会崩**。旧哈希不存在了，他们得手工修。
+
+唯一可以用 rebase 的场景：分支只有 1~2 个提交、没人 review、也没人基于它开发。真要 rebase，推的时候用
+`git push --force-with-lease`（远端有新提交时会拒绝），**永远不要用 `--force`**。
+
+### 三个坑
+
+- **squash 合并后别复用旧分支。** 你的提交被压成一个新提交进 main，旧分支的历史和 main 对不上，继续在上面开发会带出一堆重复改动。所以 `--delete-branch`，下次从新 main 切。
+- **`gh pr merge` 报 `not mergeable` 不等于“落后”。** 落后本身不阻止合并，有文本冲突才阻止。先看 `mergeStateStatus`。
+- **语义冲突没有任何工具能拦。** main 删了某个函数、你分支还在调用它——git 认为不冲突，合完才炸。合并前跑一次 `git diff origin/main...HEAD --stat`，看自己碰的文件 main 最近有没有动过。
