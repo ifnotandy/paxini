@@ -41,7 +41,6 @@
 sdk/**/*.deb
 sdk/**/*.apk
 sdk/**/*.tar.gz
-sdk/ffmpeg-win/*.exe
 
 # ---------- deb 解包目录（含 Windows 无法解析的符号链接）----------
 厂商资料/**/pxcap-studio_1.0.0_amd64/

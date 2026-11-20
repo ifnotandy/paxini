@@ -414,7 +414,7 @@ def cast_to(values: np.ndarray, dtype: np.dtype) -> np.ndarray:
 def open_recording(recording: Path, clear_flag: bool = False) -> Any:
     """Open data.h5 read-only, repairing the crashed-write consistency flag if asked."""
     if h5py is None:
-        raise AlignError("缺少 h5py：请用装了 h5py 的 Python 运行（本机用 Python312）")
+        raise AlignError("缺少 h5py：换一个装了 h5py 的 Python 解释器（先确认 `python3 -c \"import h5py\"` 能过）")
     path = recording / "data.h5"
     try:
         return h5py.File(path, "r")

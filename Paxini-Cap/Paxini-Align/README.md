@@ -54,18 +54,18 @@ Quest 的 Unix 目标时刻始终来自参考相机的 `timestamp_unix_ns − Δ
 cd Paxini-Cap/Paxini-Align
 
 # 单个采集目录
-python align_capture.py ../Recordings/data_20261116_1
+python3 align_capture.py ../Recordings/data_20261116_1
 
 # 整个 Recordings 批量（子目录里没有 data.h5 的自动跳过）
-python align_capture.py ../Recordings
+python3 align_capture.py ../Recordings
 
 # 只看统计不写文件
-python align_capture.py <目录> --dry-run
+python3 align_capture.py <目录> --dry-run
 ```
 
-本机没有 `python3.10` 的 h5py 时，用装了 h5py 的那个解释器（例如
-`C:\Users\Andy\AppData\Local\Programs\Python\Python312\python.exe`）；Ubuntu 上
-`python3.10` 装好 `requirements.txt` 就能直接跑。
+只需要 Python 3.9+ 与 `h5py`、`numpy`，**代码里没有任何平台分支**，哪个解释器装了这两个
+包装得对就用哪个（`python3 -c "import h5py, numpy"` 能过即可）。Ubuntu 上按
+`Paxini-Cap/requirements.txt` 装完就能直接跑。
 
 产物：`<采集目录>/aligned/aligned_<参考相机>.h5`。
 
@@ -236,7 +236,7 @@ A11，补测一次即可拿到两路各自的值）。若哪天把两路相机�
 ## 自检
 
 ```bash
-python selftest.py      # 24 项，不需要硬件，用合成数据精确校验插值与 Quest 门控
+python3 selftest.py     # 24 项，不需要硬件，用合成数据精确校验插值与 Quest 门控
 ```
 
 覆盖：线性信号零误差还原、Δ 逐行精确相减、边界丢弃计数、`--keep-outside`、
