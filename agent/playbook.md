@@ -196,3 +196,39 @@ PR 页面会自动重算，状态条变回可合。
 - **squash 合并后别复用旧分支。** 你的提交被压成一个新提交进 main，旧分支的历史和 main 对不上，继续在上面开发会带出一堆重复改动。所以 `--delete-branch`，下次从新 main 切。
 - **`gh pr merge` 报 `not mergeable` 不等于“落后”。** 落后本身不阻止合并，有文本冲突才阻止。先看 `mergeStateStatus`。
 - **语义冲突没有任何工具能拦。** main 删了某个函数、你分支还在调用它——git 认为不冲突，合完才炸。合并前跑一次 `git diff origin/main...HEAD --stat`，看自己碰的文件 main 最近有没有动过。
+
+## 10. 标签与分支的命名和删除
+
+### 打标签：必须显式指定提交，必须用附注标签
+
+```bash
+git tag -a <名字> <commit> -m "<一句话：这批东西是什么、对应哪个提交>"
+git push origin <名字>
+gh release create <名字> --verify-tag --title "..." --notes-file ... <资产...>
+```
+
+- **`-a` 不能省。** 轻量标签只是一个 ref，没有打标人、日期、说明，`git tag -f` 能无声挪走；附注标签是独立对象，出问题时能查是谁、什么时候、为什么。
+- **Release 的标签不能靠默认行为。** `gh release create` 不带 `--target` 时，会在**当时的默认分支 HEAD** 上建标签——那个提交和你发布的内容通常毫无关系。要么先 `git tag -a` 再 `--verify-tag`，要么明确写 `--target <sha>`。
+
+> 2026-11-20 踩过：`data-sample-20261117` 发布时没带 `--target`，标签落在 `3c42ec5`（PR #8 的 Quest 合并提交），而真正的数据在 `52f63ce`。Release 页面「Source code」下载到的是代码树，一份样例都没有。
+
+### 名字不要跨命名空间
+
+`refs/tags/archive/wsl-20261120` 和 `refs/heads/archive/wsl-backend` 同属 `archive/`，`git log --decorate` 里混在一起，看图和补全都容易选错。标签用不带斜杠的平铺名：`wsl-backend-archive-20261120`、`data-sample-20261117`、`vendor-binaries-v1.0`。
+
+### 删分支前先确认 tip 有标签
+
+```bash
+git branch -a --contains <sha>     # 除了待删分支，还有谁指向它
+git tag --contains <sha>           # 标签能不能接管溯源
+```
+
+两条都只剩待删的那个分支时，**先打标签再删**，否则提交变不可达，gc 之后连 `git cat-file` 都取不回来。
+
+> 2026-11-20：`52f63ce` 当时只被 `data/sample-20261117` 一个分支指向。先修标签、再删分支，顺序反了那 251 MB 样例就再也无法从 git 复现。
+
+### 归档分支的处置
+
+- 冻结快照分支（如 `archive/wsl-backend`）**只加一个说明文件，不删任何代码**，checkout 出来必须能直接跑。
+- 它不参与合并。合并只会带进"相对分叉点的增量"，main 上的删除不受影响——想要回某段代码就显式 `git checkout <分支> -- <文件>`。
+- 归档分支的说明文档（`ARCHIVED.md`）在 main 上也要放一份，否则 main 里所有"见 ARCHIVED.md"都是死引用。
