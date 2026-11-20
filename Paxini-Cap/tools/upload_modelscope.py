@@ -216,6 +216,8 @@ def do_upload(
         folder_path=str(staging),
         repo_type="dataset",
         commit_message=commit_message,
+        # modelscope 会在本地目录里落一个 .ms_upload_cache，别把它当数据推上去。
+        ignore_patterns=[".ms_upload_cache", ".ms_upload_cache/**", "*.log", "*.part"],
     )
     log("[上传] 完成")
 
@@ -338,7 +340,12 @@ def main(argv: list[str] | None = None) -> int:
     if not args.upload:
         log("")
         log("[演练] 未联网。确认无误后加 --upload 真正上传。")
-        log(f"[演练] 将上传：{', '.join(p.name for p in sorted(staging.iterdir()) if p.is_file())}")
+        visible = [
+            path.name
+            for path in sorted(staging.iterdir())
+            if path.is_file() and not path.name.startswith(".")
+        ]
+        log(f"[演练] 将上传：{', '.join(visible)}")
         return 0
 
     token = args.token or os.environ.get("MODELSCOPE_API_TOKEN") or ""
