@@ -10,26 +10,32 @@
 
 | 目录 | 手别 | 相机 | 手套 | 时长 | Quest | 来历 |
 |---|---|---|---|---|---|---|
-| `data_20261117_1` | 右手 | 双路 1280×720@30 | 2379 行 / 114.2 Hz | 24.5 s | 有 | 样例，来自标签 `data-sample-20261117` @ `52f63ce`（源分支已删，标签保留溯源） |
-| `data_20261117_2` | 右手 | 双路 1280×720@30 | 2587 行 / 115.1 Hz | 26.3 s | 有 | 同上 |
-| `data_20261117_3` | 右手 | 双路 1280×720@30 | 2620 行 / 117.1 Hz | 26.3 s | 有 | 同上 |
-| `data_20261118_1` | 右手 | 双路 1280×720@30 | 2396 行 / 115.9 Hz | 24.3 s | **无**（`quest_rows=0`） | 本机现采 |
+| `data_20261117_1` | 右手 | 双路 1280×720@30 | 2379 行 / 114.2 Hz | 24.5 s | 无（`quest_rows=0`） | 样例，来自标签 `data-sample-20261117` @ `52f63ce`（源分支已删，标签保留溯源） |
+| `data_20261117_2` | 右手 | 双路 1280×720@30 | 2587 行 / 115.1 Hz | 26.3 s | 无（`quest_rows=0`） | 同上 |
+| `data_20261117_3` | 右手 | 双路 1280×720@30 | 2620 行 / 117.1 Hz | 26.3 s | 无（`quest_rows=0`） | 同上 |
+| `data_20261118_1` | 右手 | 双路 1280×720@30 | 2396 行 / 115.9 Hz | 24.3 s | 无（`quest_rows=0`） | 本机现采 |
 
-三份 20261117 样例的行数与 `manifest.json` 已核对一致（2026-11-20），
-`data.h5` 均为 `format_version=4`，可直接喂
-[`../Paxini-Align/align_capture.py`](../Paxini-Align/align_capture.py)。
+四份的行数、频率、时长与各自的 `manifest.json` 逐项核对一致（2026-11-20，按
+`manifest.rows` / `actual_rate_hz` / `duration_s` 读，不按目录名猜）；`data.h5` 均为
+`format_version=4`，可直接喂 [`../Paxini-Align/align_capture.py`](../Paxini-Align/align_capture.py)。
+
+**四份都没有 Quest 行**（`quest_rows=0`、`quest.enabled=false`）。表格早先给三份
+20261117 样例标过「有」，那是因为 `data.h5` 里有空的 `quest/` 组——组在、行是 0，
+不等于采到了数据；C8 与 Quest 对齐在这批数据上无从验证。
 
 ## 已知限制
 
-**这批数据是 2026-11-17 在旧采集路径（相机经 Windows）下产生的**，当前 `main` 只有原生
-Ubuntu（V4L2）一条路。读这批数据时注意：
+**这四份都是旧采集路径（WSL2，相机经 Windows）下产生的**（`manifest.env.platform` 全为
+`...microsoft-standard-WSL2`，相机 device 是 Windows 的 `@device_pnp_\\?\usb#vid_...` 串），
+当前 `main` 只有原生 Ubuntu（V4L2）一条路。读这批数据时注意：
 
 - 相机 ID 是 `right_cam0` / `right_cam1`（当时前缀跟手别走），当前代码写 `<cap_side>_camN`；
-- 对齐这批数据要用的 Δ 是当时实测的 **192.3 ms**（1280×720@30 `copy`；原始台账在
+- 对齐这批数据要用当时的 Δ **192.3 ms**（1280×720@30 `copy`；原始台账在
   `archive/wsl-backend` 分支的 `Cap_Quest/latency/records/andy-win.yaml`）。**当前路径必须
-  重测，不能沿用这个数**；
-- 三份样例的 `data.h5` 里有 `quest/` 组，但 C8 时钟域从未验证，`--quest-align sdk_unix`
-  会被门控拒绝。这是预期行为，不是数据损坏。
+  重测，不能沿用它**；2026-11-20 起 Align 的默认 Δ 是 0（未标定），所以对齐这批老数据
+  必须显式给 `--delay-ms 192.3`，否则拿到的是一份没做延迟补偿的产物；
+- 四份的 `data.h5` 里都有 `quest/` 组但 0 行，C8 时钟域从未验证，`--quest-align sdk_unix`
+  没有可对齐的样本，会被门控拒绝。这是预期行为，不是数据损坏。
 
 另外 `data_20261118_1` 与 `DOC/待验证清单.md` C8/A12 引用的同名文件**不是同一份**
 （那份是 Quest 左手、640×480@15、`left_cam0` 245 帧，原始文件已不在本工作区）。
