@@ -50,13 +50,14 @@
   内容：`data_20261117_{1,2,3}.zip` + `SHA256SUMS.txt` + `README.md`（数据集卡片）。
   三份 zip 已回读校验：`sha256sum -c SHA256SUMS.txt` 三个 `OK`，且与本地原件逐字节相同。
 
-  注意：仓库私有，匿名访问返回 404，「匿名下载」这条验收**尚未满足**。要对外分发必须先
-  把仓改成公开（`update_dataset("yanglab/paxini", visibility=5)`，或网页端设置），公开后
-  链接才能被非成员下载。
+  这是**内部专用**仓（2026-11-20 决定）：私有是刻意设置，不是没配好。组织成员登录后
+  可下载，匿名访问返回「不存在的数据集」属预期。将来要对外分发，先改公开
+  （`update_dataset("yanglab/paxini", visibility=5)`），再把这一段的措辞一起改掉——
+  这批数据是旧采集路径产物，对外部用户还得额外交代 Δ 的来源。
 - GitHub Release（只放 20261117 三份样例的 zip，tag 指向数据源提交 `52f63ce`）：
   <https://github.com/yang-robotics/paxini/releases/tag/data-sample-20261117>
 
-两处都受权限控制，当前对外分发都还没打通。
+两处都只对组织成员开放，没有对外分发渠道——这是当前的口径，不是遗留缺陷。
 
 ## 新增采集
 
