@@ -48,7 +48,7 @@ python3.10 capture/collect_cap.py --list-devices
 ```bash
 python3.10 capture/collect_cap.py \
   --duration 60 \
-  --apk ../sdk/XRoboToolkit-Quest-1.0.1.apk \
+  --apk ../sdk/xrobotoolkit/XRoboToolkit-Quest-1.0.1.apk \
   --start-pc-service
 ```
 
@@ -66,7 +66,7 @@ python3.10 capture/collect_cap.py \
 找到最新一份真正生成了 `data.h5` 的采集，并生成浏览器版回放：
 
 ```bash
-RUN=$(find recordings -maxdepth 2 -name data.h5 -printf '%T@ %h\n' \
+RUN=$(find ../Recordings -maxdepth 2 -name data.h5 -printf '%T@ %h\n' \
   | sort -nr | head -1 | cut -d' ' -f2-)
 python3.10 viewer/visualize.py "$RUN" --html
 ```
@@ -74,7 +74,7 @@ python3.10 viewer/visualize.py "$RUN" --html
 输出：
 
 ```text
-recordings/data_YYYYMMDD_N/
+../Recordings/data_YYYYMMDD_N/
 ├── viewer.html
 └── preview/
     ├── left_cam0.mp4
@@ -166,14 +166,14 @@ python3.10 capture/collect_cap.py \
   --camera-width 640 \
   --camera-height 480 \
   --camera-fps 15 \
-  --apk ../sdk/XRoboToolkit-Quest-1.0.1.apk \
+  --apk ../sdk/xrobotoolkit/XRoboToolkit-Quest-1.0.1.apk \
   --start-pc-service
 ```
 
 测试成功后执行：
 
 ```bash
-RUN=$(find recordings -maxdepth 2 -name data.h5 -printf '%T@ %h\n' \
+RUN=$(find ../Recordings -maxdepth 2 -name data.h5 -printf '%T@ %h\n' \
   | sort -nr | head -1 | cut -d' ' -f2-)
 python3.10 viewer/visualize.py "$RUN" --html
 ```
@@ -203,8 +203,11 @@ python3.10 capture/collect_cap.py --cap-side left --pose-side right
 
 ## 数据位置
 
+采集输出写在 `<Paxini-Cap>/Recordings/`，不在 `Cap_Quest` 里面——采集端和
+`Paxini-Align/` 读同一批目录。下面的路径相对 `Cap_Quest`：
+
 ```text
-recordings/data_YYYYMMDD_N/
+../Recordings/data_YYYYMMDD_N/
 ├── data.h5
 ├── manifest.json
 └── cameras/
@@ -226,7 +229,7 @@ python3.10 - <<'PY'
 import json
 from pathlib import Path
 
-run = sorted(Path("recordings").glob("data_*"), key=lambda p: p.stat().st_mtime)[-1]
+run = sorted(Path("../Recordings").glob("data_*"), key=lambda p: p.stat().st_mtime)[-1]
 m = json.loads((run / "manifest.json").read_text(encoding="utf-8"))
 print("目录:", run)
 print("手套:", m["rows"], "Quest:", m["quest_rows"])

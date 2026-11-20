@@ -86,10 +86,13 @@ from quest3 import (
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-# 采集程序在 capture/ 下，配置与输出放在上一层（Cap_Quest 根）：
+# 采集程序在 capture/ 下，配置放在上一层（Cap_Quest 根）：
 # 配置被采集、延时测量、手套标定三处共用，放根目录避免各自维护一份。
 QUEST_ROOT = SCRIPT_DIR.parent
-DEFAULT_OUTPUT_ROOT = QUEST_ROOT / "recordings"
+# 输出放在再上一层（Paxini-Cap 根）：采集和 Paxini-Align 都要读同一批目录，
+# 放在 Cap_Quest 里面会让下游只能写死一个相对路径绕回来取数据。
+CAP_ROOT = QUEST_ROOT.parent
+DEFAULT_OUTPUT_ROOT = CAP_ROOT / "Recordings"
 DEFAULT_CONFIG_PATH = QUEST_ROOT / "cap_config.yaml"
 # PXCap III has no motor/encoder bottleneck, so the default matches the product
 # data rate instead of PXDex's 30 Hz (PXDex is limited by its 78 Hz encoder).
@@ -1411,7 +1414,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--output-dir",
-        help="输出目录；默认 recordings/data_<日期>_<序号>",
+        help="输出目录；默认 <Paxini-Cap>/Recordings/data_<日期>_<序号>",
     )
     parser.add_argument(
         "--omit-distribution",

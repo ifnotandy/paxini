@@ -26,7 +26,7 @@ python3.10 capture/collect_cap.py --cap-side right --no-quest
 **成功判据**：结束时会打印 `verify.row_mismatch` 为空。非空说明某组数据集首维与
 自己的行数不一致，这个文件能打开但按行取数会整体错位。
 
-产物在 `recordings/data_<YYYYMMDD>_<n>/`。
+产物在 `Paxini-Cap/Recordings/data_<YYYYMMDD>_<n>/`（在 `Cap_Quest` 下看是 `../Recordings/`）。
 
 ## 2. 采集起不来，按现象查
 
@@ -127,9 +127,9 @@ median = entry["median_ms"]
 ## 6. 看采到的数据
 
 ```bash
-python3.10 viewer/visualize.py recordings/data_20261113_9            # Tk 窗口
-python3.10 viewer/visualize.py recordings/data_20261113_9 --html     # 导出浏览器版
-python3.10 viewer/visualize.py recordings/data_20261113_9 --save-png a.png
+python3.10 viewer/visualize.py ../Recordings/data_20261113_9            # Tk 窗口
+python3.10 viewer/visualize.py ../Recordings/data_20261113_9 --html     # 导出浏览器版
+python3.10 viewer/visualize.py ../Recordings/data_20261113_9 --save-png a.png
 ```
 
 没有 `python3.10-tk` 时用 `--html`。浏览器版支持悬停读数、保峰抽稀、双路视频面板。

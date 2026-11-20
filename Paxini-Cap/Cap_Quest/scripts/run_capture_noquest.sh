@@ -30,8 +30,10 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-# 本脚本在 scripts/ 下，采集程序在 capture/、配置与输出在上一层
+# 本脚本在 scripts/ 下，采集程序在 capture/、配置在上一层
 QUEST_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
+# 输出在 Paxini-Cap 根下，与采集端 DEFAULT_OUTPUT_ROOT 保持同一位置
+RECORDINGS_ROOT="$(cd -- "$SCRIPT_DIR/../.." && pwd)/Recordings"
 cd "$QUEST_ROOT/capture" || { echo "[X] 无法进入采集目录"; exit 2; }
 
 PY="${PYTHON:-python3.10}"
@@ -219,7 +221,7 @@ step 6/6 "结果摘要"
 if [ -n "$OUT_DIR" ]; then
   TARGET="$OUT_DIR"
 else
-  TARGET="$(ls -dt "$QUEST_ROOT"/recordings/data_* 2>/dev/null | head -1)"
+  TARGET="$(ls -dt "$RECORDINGS_ROOT"/data_* 2>/dev/null | head -1)"
 fi
 
 if [ -z "${TARGET:-}" ] || [ ! -f "$TARGET/manifest.json" ]; then

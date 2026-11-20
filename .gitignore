@@ -6,6 +6,7 @@
 # ---------- 采集数据 / 录像（体积极大，仅保留本地）----------
 厂商数据采集/
 **/recordings/
+**/Recordings/
 **/clock_probe/
 *.mkv
 *.mp4

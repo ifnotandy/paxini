@@ -54,10 +54,10 @@ Quest 的 Unix 目标时刻始终来自参考相机的 `timestamp_unix_ns − Δ
 cd Paxini-Cap/Paxini-Align
 
 # 单个采集目录
-python align_capture.py ../Cap_Quest/recordings/data_20261116_1
+python align_capture.py ../Recordings/data_20261116_1
 
-# 整个 recordings 批量（子目录里没有 data.h5 的自动跳过）
-python align_capture.py ../Cap_Quest/recordings
+# 整个 Recordings 批量（子目录里没有 data.h5 的自动跳过）
+python align_capture.py ../Recordings
 
 # 只看统计不写文件
 python align_capture.py <目录> --dry-run
@@ -160,7 +160,7 @@ Quest 启用时还会包含 C8 报告 SHA-256、有效配对比例和年龄分�
 
 | 参数 | 默认 | 说明 |
 |---|---|---|
-| `path` | `.` | 采集目录，或 recordings 根目录（批量） |
+| `path` | `.` | 采集目录，或 Recordings 根目录（批量；标准位置是 `../Recordings`） |
 | `--output` | `<采集目录>/aligned` | 输出目录 |
 | `--reference` | 第一个相机 | 作为采样网格的相机槽位 |
 | `--timebase` | `auto` | `auto` 优先 `mono`；没有单调钟列时退回 `unix` |

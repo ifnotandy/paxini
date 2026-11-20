@@ -192,7 +192,7 @@ print("跳变次数:", jumps.size, "位置(行号):", jumps[:5].tolist())
 （MJPEG 直通，`-c:v copy`）：
 
 ```text
-recordings/data_20261111_1/
+Recordings/data_20261111_1/          # 在 Paxini-Cap 根下，不在 Cap_Quest 里
 ├── data.h5                  ← 本文档描述的就是它
 ├── manifest.json
 └── cameras/

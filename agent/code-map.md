@@ -8,16 +8,17 @@
 
 | 任务 | 文件 | 具体位置 | 怎么验 |
 |---|---|---|---|
-| 增删 HDF5 数据集 | `capture/collect_cap.py` | `CAP_DATASETS`(:515) | `selftest` + 同步 `DOC/HDF5结构说明.md` |
-| 改 `quest/` 的列 | `capture/collect_cap.py` | `_quest_layout()`(:602) | `selftest` 的 "Quest 行" 组 |
-| 加命令行参数 | `capture/collect_cap.py` | `build_parser()`(:1262) | `--help` 对照 + 补 `cap_config.yaml` |
-| 改配置加载/优先级 | `capture/collect_cap.py` | `load_config_file()`(:1661)、`apply_config()`(:1690) | `selftest` 的 "配置" 组 |
+| 增删 HDF5 数据集 | `capture/collect_cap.py` | `CAP_DATASETS`(:551) | `selftest` + 同步 `DOC/HDF5结构说明.md` |
+| 改 `quest/` 的列 | `capture/collect_cap.py` | `_quest_layout()`(:642) | `selftest` 的 "Quest 行" 组 |
+| 加命令行参数 | `capture/collect_cap.py` | `build_parser()`(:1265) | `--help` 对照 + 补 `cap_config.yaml` |
+| 改配置加载/优先级 | `capture/collect_cap.py` | `load_config_file()`(:1664)、`apply_config()`(:1693) | `selftest` 的 "配置" 组 |
+| 改采集输出位置 | `capture/collect_cap.py` + `scripts/run_capture_noquest.sh` | `CAP_ROOT` / `DEFAULT_OUTPUT_ROOT`(:95) 与脚本里的 `RECORDINGS_ROOT` | **两处必须同时改**；改完 `--help` 看默认值，再跑脚本确认摘要找到新目录 |
 | 单只手套左右手选择 | `capture/collect_cap.py` | `HAND_SIDES`、`build_parser()`、`resolve_pose_side()`、`main()` | `selftest` 的 "手别选择" 组 |
 | 启动失败诊断 | `capture/collect_cap.py` | `write_startup_failure()`、`main()` 的 `finally` | `selftest` 的 "启动失败工件" 组 |
-| 采集主循环节拍 | `capture/collect_cap.py` | `pump_and_record()`(:1952) | 跑一次采集看 `manifest.row_mismatch` |
-| 回调线程入队 | `capture/collect_cap.py` | `snapshot_cap_frame()`(:317) | 只做拷贝，别在这里写盘 |
-| 批量落盘策略 | `capture/collect_cap.py` | `Hdf5Recorder.write_cap()`(:698)、`flush_cap()`(:715) / `_flush_cap_locked()`、`FLUSH_ROWS` | flush 时机影响中途读文件的结果 |
-| 终止时落盘 | 同上 | `emergency_save()`(:979)、`emergency_save_and_exit()`(:206) | `selftest` 的"收尾/紧急落盘"三项 |
+| 采集主循环节拍 | `capture/collect_cap.py` | `pump_and_record()`(:1955) | 跑一次采集看 `manifest.row_mismatch` |
+| 回调线程入队 | `capture/collect_cap.py` | `snapshot_cap_frame()`(:320) | 只做拷贝，别在这里写盘 |
+| 批量落盘策略 | `capture/collect_cap.py` | `Hdf5Recorder.write_cap()`(:701)、`flush_cap()`(:718) / `_flush_cap_locked()`、`FLUSH_ROWS` | flush 时机影响中途读文件的结果 |
+| 终止时落盘 | 同上 | `emergency_save()`(:982)、`emergency_save_and_exit()`(:211) | `selftest` 的"收尾/紧急落盘"三项 |
 
 **并发模型（改这里之前必读）**：`Hdf5Recorder` 用一把**非重入** `Lock` 串行化所有 HDF5
 写操作，因为看门狗与信号处理器会在主线程写入的过程中试图落盘。因此：
@@ -33,9 +34,9 @@
 | 每帧时间戳回填 | `capture/camera_ffmpeg.py` | `probe()`(:815) → `probe_frames()`(:303) | 采集后看 `cameras/*/timestamp_unix_ns` 是否单调 |
 | 设备枚举 | `capture/camera_ffmpeg.py` | `discover_video_nodes()`(:201) / `discover_windows_cameras()`(:116) | `--list-devices` |
 | Quest 连接与样本 | `capture/quest3.py` | `XrtReader.collect_sample()` | `selftest` 的 "Quest 采集" 组 |
-| Quest C8 时钟探针 | `diagnostics/quest_clock_probe.py` | `run_probe()`(:263)、`evaluate_clock_samples()`(:129) | `selftest` 的 "C8 探针" 组；产物落 `clock_probe/` |
-| 回放窗口 | `viewer/visualize.py` | `collect_payload()`(:380) → `run_window()`(:545) / `write_viewer()`(:962) | `--save-png` 出一张 |
-| Quest 回放 payload | `viewer/quest_view.py` | `load_quest_view()`(:144)、`load_clock_report()`(:98)、`take_evenly()`(:26) | `selftest` 的 "Quest 可视化"；默认独立轴，C8 通过才可 `sdk_unix` |
+| Quest C8 时钟探针 | `diagnostics/quest_clock_probe.py` | `run_probe()`(:286)、`evaluate_clock_samples()`(:130) | `selftest` 的 "C8 探针" 组；产物落 `clock_probe/` |
+| 回放窗口 | `viewer/visualize.py` | `collect_payload()`(:380) → `run_window()`(:549) / `write_viewer()`(:966) | `--save-png` 出一张 |
+| Quest 回放 payload | `viewer/quest_view.py` | `load_quest_view()`(:161)、`load_clock_report()`(:115)、`take_evenly()`(:26) | `selftest` 的 "Quest 可视化"；默认独立轴，C8 通过才可 `sdk_unix` |
 | 回放视频预览 | `viewer/visualize.py` | `build_preview()`(:302) | `selftest` 的 "视频" 组 |
 | 实时视图 | `viewer/live_view.py` | `HtmlLiveView`(:775) / `LiveView`(:922) | `--view` 起一次 |
 | 手套零点标定 | `calib/hand_calib.py` | `check_*_gate`、子命令 `encoder`/`sensor`/`magnet` | `calib/hand_calib.py selftest`（7 项） |
@@ -47,12 +48,12 @@
 
 | 任务 | 文件 | 具体位置 | 怎么验 |
 |---|---|---|---|
-| 改采样网格 / 参考相机 | `Paxini-Align/align_capture.py` | `align_recording()`(:302)、`--reference` | `selftest.py` 的"多相机最近帧"项 |
-| 改插值方式 | 同上 | `lerp_rows()`(:225) / `nearest_rows()`(:254) | 合成线性信号零误差（selftest 第 1 项） |
-| 改延迟补偿 | 同上 | `resolve_delay()`(:172) | `--no-delay` 与默认值对照，差值应等于 Δ |
-| 改输出字段 | 同上 | `write_aligned()`(:462) | `selftest` 的"输出可重开"项 + 同步 `Paxini-Align/README.md` 字段表 |
-| 改质量判据 | 同上 | `gates()`(:563)、`report()`(:531) | `--strict` 跑一次真采集 |
-| 改 Quest 对齐 | `Paxini-Align/align_capture.py` | `load_quest_clock_report()`、`align_quest_to_targets()`、`write_quest_alignment()` | `selftest.py` 的 Quest 因果选样、C8 硬门控、完整字段复制；同步 Align README |
+| 改采样网格 / 参考相机 | `Paxini-Align/align_capture.py` | `align_recording()`(:533)、`--reference` | `selftest.py` 的"多相机最近帧"项 |
+| 改插值方式 | 同上 | `lerp_rows()`(:366) / `nearest_rows()`(:395) | 合成线性信号零误差（selftest 第 1 项） |
+| 改延迟补偿 | 同上 | `resolve_delay()`(:313) | `--no-delay` 与默认值对照，差值应等于 Δ |
+| 改输出字段 | 同上 | `write_aligned()`(:869) | `selftest` 的"输出可重开"项 + 同步 `Paxini-Align/README.md` 字段表 |
+| 改质量判据 | 同上 | `gates()`(:1020)、`report()`(:966) | `--strict` 跑一次真采集 |
+| 改 Quest 对齐 | `Paxini-Align/align_capture.py` | `load_quest_clock_report()`(:85)、`align_quest_to_targets()`(:444)、`write_quest_alignment()`(:824) | `selftest.py` 的 Quest 因果选样、C8 硬门控、完整字段复制；同步 Align README |
 
 对齐层**只读** `data.h5`，绝不回写；改这里不会影响采集端，但改了输出布局要升
 `ALIGNED_FORMAT_VERSION`（当前 2，与采集端的 4 无关）。

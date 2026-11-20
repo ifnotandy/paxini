@@ -1062,7 +1062,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="align_capture.py",
         description="把手套(cap)流按相机帧时刻重采样：相机时间戳为主轴，cap 线性插值到该时刻。",
     )
-    parser.add_argument("path", nargs="?", default=".", help="采集目录，或 recordings 根目录（批量）")
+    parser.add_argument("path", nargs="?", default=".", help="采集目录，或 Recordings 根目录（批量；标准位置是 ../Recordings）")
     parser.add_argument("--output", default=None, help="输出目录，默认 <采集目录>/aligned")
     parser.add_argument("--reference", default=None, help="作为采样网格的相机槽位，默认第一个（通常是 cam0）")
     parser.add_argument("--timebase", choices=("auto", "mono", "unix"), default="auto",

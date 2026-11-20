@@ -40,9 +40,11 @@ ffmpeg 让每帧 pts 直接取主机墙钟并原样写进容器，停止后用 `
 | `diagnostics/` | 时钟域诊断 | `quest_clock_probe.py`（C8 探针；产物落 `clock_probe/`） |
 | `selftest/` | 不接硬件的自检 | `selftest.py` |
 | `scripts/` | 一键脚本 | `run_capture_noquest.sh` |
-| `recordings/` | 采集输出（`data_<日期>_<序号>/`） | — |
 | `cap_config.yaml` | 采集配置，采集 / 延时测量 / 标定三处共用 | — |
 | `QUICKSTART.md` | 当前机器的 XRoboToolKit 联合采集快速上手 | — |
+
+采集输出**不在本目录**：默认写到 `<Paxini-Cap>/Recordings/data_<日期>_<序号>/`，
+采集端与 `Paxini-Align/` 读同一批目录（见 §4）。
 
 跨目录依赖靠各脚本开头的 `sys.path` 注入解决：`viewer/`、`selftest/`、`latency/`
 都会把 `capture/` 加进搜索路径。`calib/` 只依赖 SDK，不引用采集模块，跟 `capture/`
@@ -136,7 +138,7 @@ usbipd 的 attach 随之失效，而 `usbipd list` 仍显示 `Attached`。脚本
 
 #### 换一台机器要改什么
 
-代码里的路径都相对**脚本所在目录**解析（`cap_config.yaml`、`recordings/`、
+代码里的路径都相对**脚本所在目录**解析（`cap_config.yaml`、`../Recordings/`、
 `../sdk/ffmpeg-win/`），所以只要仓库结构不变就不用改代码。真正会挡住别人的是四件事：
 
 | 项 | 本机现状 | 别人怎么办 |
@@ -202,7 +204,7 @@ sudo timedatectl set-ntp false      # 采完再 set-ntp true
 ## 4. 输出
 
 ```text
-recordings/data_<YYYYMMDD>_<当天序号>/
+../Recordings/data_<YYYYMMDD>_<当天序号>/     # 相对 Cap_Quest；实际在 <Paxini-Cap>/Recordings/
 ├── data.h5
 ├── manifest.json
 └── cameras/
@@ -246,9 +248,9 @@ HDF5 只存索引性质的时间戳。
 `visualize.py` 直接读采集目录，不需要重新解码视频：
 
 ```bash
-python3.10 viewer/visualize.py recordings/data_<日期>_<序号>          # Tk 窗口
-python3.10 viewer/visualize.py recordings/data_<日期>_<序号> --html   # 导出 viewer.html
-python3.10 viewer/visualize.py recordings/data_<日期>_<序号> --save-png run.png
+python3.10 viewer/visualize.py ../Recordings/data_<日期>_<序号>          # Tk 窗口
+python3.10 viewer/visualize.py ../Recordings/data_<日期>_<序号> --html   # 导出 viewer.html
+python3.10 viewer/visualize.py ../Recordings/data_<日期>_<序号> --save-png run.png
 ```
 
 - 窗口里三张曲线（关节角 / 合力模长 1~5 路 / 合力模长 6~10 路）+ 右侧一张
@@ -308,7 +310,7 @@ Unix 时钟的残差和时钟斜率。默认阈值为有效覆盖 ≥95%、有�
 只有报告为 `passed=true` 且 `clock_domain=unix_epoch`，才允许显式启用对齐：
 
 ```bash
-python3.10 viewer/visualize.py recordings/data_YYYYMMDD_N \
+python3.10 viewer/visualize.py ../Recordings/data_YYYYMMDD_N \
   --html \
   --quest-align sdk_unix \
   --quest-clock-report clock_probe/run_YYYYMMDD_HHMMSS/report.json
@@ -468,7 +470,8 @@ HTTP 服务、页面、JPEG 缓冲、MJPEG 连接全在子进程里。两处细�
 | 第二次 `Ctrl+C` | 同上，最多等 5 秒 | 同上 |
 | 主线程正卡在 HDF5 里（抢不到锁） | 不强写（并发写会弄坏文件），直接退出 | 数据到最后一个已 flush 的批 |
 
-抢不到锁是刻意的：`emergency_save` 用带超时的 `RLock`，拿不到说明主线程正在
+抢不到锁是刻意的：`emergency_save` 用带超时的 `Lock`（**不能是 `RLock`**，原因见
+[`agent/pitfalls.md`](../../agent/pitfalls.md) 里 Ctrl+C 重入那段），拿不到说明主线程正在
 HDF5 里做 resize/flush，这时候从另一个线程插进去写会让文件结构损坏。宁可少几行。
 
 退出码 130 之后，`data.h5` 可能带"写打开"标志，读之前先
@@ -521,7 +524,7 @@ view: false              # 采集时开实时窗口
 | `--camera-backend` | `auto` | `auto` 按运行环境判定：WSL → `wsl`，原生 Linux → `linux`；也可强制 `linux` / `wsl` |
 | `--ffmpeg-win` | `sdk/ffmpeg-win/ffmpeg.exe` | Windows 版 ffmpeg 路径，仅 `wsl` 后端用 |
 | `--duration` | `0` | 采集秒数，0 表示到 Ctrl+C |
-| `--output-dir` | — | 默认 `recordings/data_<日期>_<序号>` |
+| `--output-dir` | — | 默认 `<Paxini-Cap>/Recordings/data_<日期>_<序号>` |
 | `--omit-distribution` | 关 | 不写 444 点分布力 |
 | `--view` / `--no-view` | `false` | 采集时开实时视图；配置文件可设 `view: true` |
 | `--view-mode` | `auto` | `auto` = WSL 用 `html`、原生 Linux 用 `tk`；`html` = 本地页面 `http://127.0.0.1:8765/`（fork 子进程，端口由子进程绑定后回报）；`tk` = matplotlib 独立子进程窗口 |
