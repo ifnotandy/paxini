@@ -356,7 +356,6 @@ def run_camera(
         fps,
         codec,
         ffmpeg_exe,
-        backend="linux",
         preview_fps=0.0,  # 不要预览流：第二个输出会改变 ffmpeg 的写出节奏
     )
     camera.open()

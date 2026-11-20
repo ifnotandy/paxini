@@ -53,7 +53,6 @@ import os
 import queue as queue_module
 import sys
 import time
-from pathlib import Path
 from typing import Any, Sequence
 
 import numpy as np

@@ -35,7 +35,6 @@
 from __future__ import annotations
 
 import getpass
-import os
 import socket
 from datetime import datetime
 from pathlib import Path
