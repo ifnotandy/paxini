@@ -25,7 +25,7 @@
 Ubuntu（V4L2）；WSL 版本冻结在 `archive/wsl-backend` 分支。因此：
 
 - 相机 ID 是 `right_cam0` / `right_cam1`（当时前缀跟手别走），当前代码写 `<cap_side>_camN`；
-- 对齐用的 Δ 是 WSL 路径实测的 **192.3 ms**（`Cap_Quest/latency/records/andy-win.yaml`
+- 对齐用的 Δ 是 WSL 路径实测的 **192.3 ms**（`Cap_Quest/latency/records/archive/andy-win.yaml`
   第 3 条，1280×720@30 `copy`）。换原生 V4L2 必须重测，不能沿用；
 - 三份样例的 `data.h5` 里有 `quest/` 组，但 C8 时钟域从未验证，`--quest-align sdk_unix`
   会被门控拒绝。这是预期行为，不是数据损坏。

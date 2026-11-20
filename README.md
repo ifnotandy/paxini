@@ -39,7 +39,7 @@ PXCap III 数据手套与 PXDex III 灵巧手的开发工作区。两条线，�
 
 ## 安装包与二进制
 
-单个文件 8–171 MB，不纳入 Git，统一放在 [Releases](../../releases) 的 `vendor-binaries-v1.0`。克隆后按下表放回：
+单个文件 8–171 MB，不纳入 Git，统一放在 [Releases](https://github.com/yang-robotics/paxini/releases) 的 `vendor-binaries-v1.0`。克隆后按下表放回：
 
 | 文件 | 放回位置 |
 |---|---|

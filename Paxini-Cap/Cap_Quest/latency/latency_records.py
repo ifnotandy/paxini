@@ -6,7 +6,8 @@
 直接回答「这台机器该用哪个 Δ」。本模块把每次测量的结论追加进一份固定文件，
 文件名就是「电脑用户-平台」：
 
-    latency/records/andy-win.yaml      WSL 采集路径（脚本在 Windows 侧执行）
+    latency/records/<user>-ubuntu.yaml  原生 V4L2 采集路径（当前唯一）
+    latency/records/archive/andy-win.yaml  WSL 时代的历史台账（只读，不要取数）
     latency/records/ifnot-ubuntu.yaml  原生 Ubuntu 采集路径
 
 一台机器一个文件，换机器就多一个文件，互不覆盖。一条记录长这样，键是测量序号：
@@ -33,7 +34,7 @@
     rows = to_rows(load_records())                  # 摊平成列表，可直接喂 pandas
 
     # 读另一台机器（比如在 ubuntu 上处理 win 采的数据）
-    data = load_records(Path(".../latency/records/andy-win.yaml"))
+    data = load_records(Path(".../latency/records/archive/andy-win.yaml"))
 """
 
 from __future__ import annotations

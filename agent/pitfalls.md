@@ -84,8 +84,8 @@ python -m pip install --force-reinstall --no-deps opencv-python
 **根因**：DirectShow 相机是独占的。上一轮 `ffmpeg.exe` 退出后驱动还要一点时间才
 真正释放。
 
-**对策**：两轮之间等 2~3 秒。`latency/measure_camera_latency_wsl.py` 的 `--repeat`
-已内置 2.5 s 等待 + 一次重试。
+**对策**：两轮之间等 2~3 秒。`latency/measure_camera_latency.py` 的 `--repeat`
+已内置等待与重试。
 
 ### `import pxhandsdk` 成功，但 `PxCap3` 不存在
 
@@ -140,8 +140,8 @@ python -m pip install --force-reinstall --no-deps opencv-python
 
 **根因**：没做相机延迟标定，或用的是别人机器上的默认值。
 
-**对策**：跑对应采集路径的测量脚本（原生 Ubuntu → `measure_camera_latency.py`，WSL →
-`measure_camera_latency_wsl.py`），数从 `latency/records/` 里取最近一次的合格值
+**对策**：跑 `latency/measure_camera_latency.py`（原生 V4L2 唯一路径），数从
+`latency/records/` 里取最近一次的合格值
 （`pick_latest(load_records(), camera=0)`），别抄文档里的数字。改了分辨率、帧率、
 codec、USB 口、机器都要重测。
 

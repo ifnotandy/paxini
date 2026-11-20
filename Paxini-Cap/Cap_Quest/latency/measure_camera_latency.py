@@ -5,7 +5,7 @@
 
 - **原生 Ubuntu**：ffmpeg 直读 ``/dev/videoN``（V4L2），本文件就是这条
 - **WSL**：Python 仍跑在 Linux 里，相机借 Windows 的 ``ffmpeg.exe`` 走
-  DirectShow，用同目录的 ``measure_camera_latency_wsl.py`` 测
+  DirectShow，用 `archive/wsl-backend` 分支里的 ``measure_camera_latency_wsl.py`` 测
 
 两者的 Δ 不可互换，各测各的。
 
@@ -650,7 +650,7 @@ def write_outputs(
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="测量相机延迟（原生 Ubuntu / V4L2 采集路径）。WSL 路径用 measure_camera_latency_wsl.py",
+        description="测量相机延迟（原生 Ubuntu / V4L2 采集路径）",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "示例：\n"
