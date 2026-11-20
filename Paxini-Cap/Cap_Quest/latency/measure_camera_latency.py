@@ -18,17 +18,15 @@
 
 这段差值就是本程序要测的 Δ。拿到之后下游减掉它，时间轴才回到接近曝光时刻。
 
-和 WSL 路径的关键差别
---------------------
-原生 Ubuntu 用 ``-use_wallclock_as_timestamps 1``，ffmpeg 在出帧时直接写
-``av_gettime()``，所以 **mkv 里的 pts 本身就是绝对墙钟**，不需要任何锚点：
+时间戳从哪来
+------------
+本脚本用 ``-use_wallclock_as_timestamps 1``，ffmpeg 在出帧时直接写 ``av_gettime()``，
+所以 **mkv 里的 pts 本身就是绝对墙钟**，不需要任何锚点：
 
-    timestamp_unix_ns[i] = pts[i]                    # 原生 Ubuntu / V4L2
-    timestamp_unix_ns[i] = epoch_unix_ns + pts[i]    # WSL / DirectShow
+    timestamp_unix_ns[i] = pts[i]
 
-WSL 路径的 pts 从 0 起（没有 ``-copyts``，ffmpeg 把首帧归零），靠「mkv 文件首次
-变大」取的 epoch 正好落在首帧写出那一刻，所以 ffmpeg.exe 启动那 1.4 秒并不进入
-时间戳。WSL 实测约 190 ms，多出来的是虚拟机边界与 DirectShow 缓冲，不是锚点误差。
+（2026-11-20 之前还有一条 WSL/DirectShow 路径，pts 从 0 起、靠 ``epoch_unix_ns``
+平移；那条路径已删除，需要时看 ``archive/wsl-backend`` 分支的同一份脚本。）
 
 - 原生 Ubuntu 的 Δ 通常几十毫秒，WSL 约 190 ms
 - 单轮就够；WSL 那边轮间会差 20 ms 左右，要 ``--repeat`` 合并
@@ -569,7 +567,7 @@ def write_outputs(
             "codec": meta.get("codec"),
             "frames": result.frames,
             "actual_fps": round(result.fps, 3),
-            # 原生 Ubuntu 的 pts 本身即墙钟，这里留空并与 WSL 路径字段对齐，便于对比两份 JSON。
+            # pts 本身即墙钟，没有独立锚点；保留该键是为了和历史 JSON 字段对齐。
             "epoch_unix_ns": None,
             "first_frame_unix_ns": result.first_ts_ns,
             "recorded_s": round(result.elapsed_s, 3),

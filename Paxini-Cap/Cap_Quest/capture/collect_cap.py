@@ -60,15 +60,11 @@ if str(_VIEWER_DIR) not in sys.path:
     sys.path.insert(0, str(_VIEWER_DIR))
 
 from camera_ffmpeg import (
-    CAMERA_BACKEND_CHOICES,
     FfmpegCamera,
     discover_video_nodes,
     ffmpeg_version,
     find_ffmpeg,
-    find_windows_ffmpeg,
     interrupt_running_cameras,
-    resolve_backend,
-    running_in_wsl,
     wait_for_cameras_ready,
 )
 from quest3 import (
@@ -776,11 +772,11 @@ class Hdf5Recorder:
     ) -> dict[str, Any]:
         """Store one camera's own frame timestamps; no pairing is done here.
 
-        ``monotonic_ns`` is only filled by the WSL backend, which can anchor
-        the relative DirectShow pts onto the host monotonic clock. The Linux
-        backend passes ``None`` and the ``timestamp_monotonic_ns`` dataset is
-        left absent — readers detect that with ``"timestamp_monotonic_ns" in
-        group`` or via ``manifest.cameras.per_camera.<id>.monotonic_available``.
+        ``monotonic_ns`` is currently always ``None``: the V4L2 path stamps
+        frames with the host wall clock, so the ``timestamp_monotonic_ns``
+        dataset is left absent. Readers detect that with
+        ``"timestamp_monotonic_ns" in group`` or via
+        ``manifest.cameras.per_camera.<id>.monotonic_available``.
         """
         timestamps = np.asarray(timestamps_ns, dtype=np.int64)
         if timestamps.size > 1 and np.any(np.diff(timestamps) < 0):
@@ -1397,22 +1393,6 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
-        "--camera-backend",
-        choices=CAMERA_BACKEND_CHOICES,
-        default="auto",
-        help=(
-            "相机采集路径。auto（默认）：WSL 里用 wsl、原生 Linux 用 linux，"
-            "启动时按运行环境判定并打印结果；"
-            "linux：ffmpeg 直接读 /dev/videoN；"
-            "wsl：调 Windows 的 ffmpeg.exe 走 DirectShow。usbipd 转发 UVC 会"
-            "丢等时包，720p 从 30fps 掉到 5fps，所以 WSL 里必须用 wsl"
-        ),
-    )
-    parser.add_argument(
-        "--ffmpeg-win",
-        help="Windows 版 ffmpeg.exe 路径，默认 sdk/ffmpeg-win/ffmpeg.exe",
-    )
-    parser.add_argument(
         "--output-dir",
         help="输出目录；默认 <Paxini-Cap>/Recordings/data_<日期>_<序号>",
     )
@@ -1442,7 +1422,7 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("auto", "html", "tk"),
         default="auto",
         help=(
-            "实时视图的形式。auto（默认）= WSL 里用 html、原生 Linux 用 tk；"
+            "实时视图的形式。auto（默认）= 有 X/Wayland 会话用 tk、没有则用 html；"
             "html = 本地页面 http://127.0.0.1:8765/（浏览器看，不依赖窗口管理器）；"
             "tk = matplotlib 独立窗口"
         ),
@@ -1814,8 +1794,8 @@ def resolve_hand_port(
     ports = discover_hand_ports(dev_root)
     if not ports:
         raise RuntimeError(
-            "未发现可用的串口。请检查手套 USB 线缆与 usbipd 转发、dialout "
-            "权限，或用 --hand-port /dev/ttyACM0 指定"
+            "未发现可用的串口。请检查手套 USB 线缆、dialout 权限，"
+            "或用 --hand-port /dev/ttyACM0 指定"
         )
 
     matches = [port for port in ports if port.usb_id == CAP_USB_ID]
@@ -1850,20 +1830,13 @@ def resolve_camera_devices(
 ) -> dict[str, str]:
     if not slots:
         return {}
-    linux_backend = getattr(args, "camera_backend", "linux") == "linux"
     devices: dict[str, str] = {}
     for slot in slots:
         configured = (
             args.camera_0 if slot == "cam0" else args.camera_1
         )
         if configured != "auto":
-            # DirectShow inputs look like "video=@device_pnp_\\?\usb#..."; the
-            # Path() normalisation would mangle them.
-            devices[slot] = (
-                str(Path(configured).expanduser())
-                if linux_backend
-                else str(configured)
-            )
+            devices[slot] = str(Path(configured).expanduser())
             continue
         if slot == "cam0" or len(discovered) == 1:
             index = 0
@@ -1889,7 +1862,7 @@ def selected_camera_slots(args: argparse.Namespace) -> tuple[str, ...]:
     return ()
 
 
-def list_devices(backend: str = "linux", ffmpeg_win: str | None = None) -> int:
+def list_devices() -> int:
     ports = discover_hand_ports()
 
     log("[INFO] USB/ACM 串口：")
@@ -1900,28 +1873,12 @@ def list_devices(backend: str = "linux", ffmpeg_win: str | None = None) -> int:
         by_id = f" by-id={port.by_id}" if port.by_id else ""
         log(f"  {port.path} USB={port.usb_id or '未知'} {marker}{by_id}")
 
-    if backend == "wsl":
-        from camera_ffmpeg import discover_windows_cameras
-
-        log("[INFO] DirectShow 视频设备（Windows，backend=wsl）：")
-        try:
-            exe = find_windows_ffmpeg(ffmpeg_win)
-        except RuntimeError as exc:
-            warn(str(exc))
-        else:
-            devices = discover_windows_cameras(exe)
-            if not devices:
-                log("  未发现")
-            for item in devices:
-                log(f"  {item['input']}")
-            log(f"[INFO] ffmpeg.exe：{exe}")
-    else:
-        nodes = discover_video_nodes()
-        log("[INFO] V4L2 视频采集节点（video-index 0）：")
-        if not nodes:
-            log("  未发现")
-        for node in nodes:
-            log(f"  {node}")
+    nodes = discover_video_nodes()
+    log("[INFO] V4L2 视频采集节点（video-index 0）：")
+    if not nodes:
+        log("  未发现")
+    for node in nodes:
+        log(f"  {node}")
 
     try:
         ffmpeg = find_ffmpeg()
@@ -2082,24 +2039,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             f"手套手别为 {args.cap_side}，Quest 显式使用 "
             f"{args.pose_side}；两路数据不会交换或镜像"
         )
-    # ``auto`` is resolved once here so that every later branch (device
-    # discovery, ffmpeg command, manifest) sees a concrete backend.
-    requested_backend = args.camera_backend
-    try:
-        args.camera_backend = resolve_backend(requested_backend)
-    except RuntimeError as exc:
-        error(str(exc))
-        return 2
-    if requested_backend == "auto":
-        reason = "WSL 环境" if running_in_wsl() else "非 WSL（原生 Linux）"
-        log(f"[INFO] 相机后端：{args.camera_backend}（auto 判定：{reason}）")
     signal.signal(signal.SIGINT, handle_stop_signal)
     signal.signal(signal.SIGTERM, handle_stop_signal)
     STOP_EVENT.clear()
     FORCE_EXIT_WATCHDOG_ARMED.clear()
 
     if args.list_devices:
-        return list_devices(args.camera_backend, args.ffmpeg_win)
+        return list_devices()
 
     reader: XrtReader | None = None
     poller: QuestPoller | None = None
@@ -2170,26 +2116,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 (args.camera_0 if slot == "cam0" else args.camera_1) == "auto"
                 for slot in camera_slots
             )
-            if args.camera_backend == "wsl":
-                from camera_ffmpeg import discover_windows_cameras
-
-                windows_ffmpeg = find_windows_ffmpeg(args.ffmpeg_win)
-                discovered = (
-                    [item["input"] for item in discover_windows_cameras(windows_ffmpeg)]
-                    if needs_discovery
-                    else []
-                )
-                if discovered:
-                    log(
-                        f"[INFO] 自动发现 DirectShow 设备（{len(discovered)} 路）："
-                        + ", ".join(discovered)
-                    )
-                log(f"[INFO] 相机后端：wsl（{windows_ffmpeg}）")
-            else:
-                windows_ffmpeg = None
-                discovered = discover_video_nodes() if needs_discovery else []
-                if discovered:
-                    log("[INFO] 自动发现视频节点：" + ", ".join(discovered))
+            discovered = discover_video_nodes() if needs_discovery else []
+            if discovered:
+                log("[INFO] 自动发现视频节点：" + ", ".join(discovered))
             camera_devices = resolve_camera_devices(
                 args,
                 camera_slots,
@@ -2216,8 +2145,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                     args.camera_fps,
                     args.video_codec,
                     ffmpeg,
-                    backend=args.camera_backend,
-                    windows_ffmpeg=windows_ffmpeg,
                     preview_fps=(
                         args.view_video_fps
                         if args.view and args.view_video
@@ -2458,27 +2385,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             for camera_id in camera_ids:
                 entry: dict[str, Any] = {
                     "device": camera_devices.get(slot_by_camera[camera_id]),
-                    "backend": args.camera_backend,
+                    "backend": "linux",
                     "file": f"cameras/{camera_id}.mkv",
                     "requested_width": args.camera_width,
                     "requested_height": args.camera_height,
                     "requested_fps": args.camera_fps,
                     "codec": args.video_codec,
-                    # Only meaningful on the WSL backend: the Unix ns that pts=0
-                    # maps to. Linux pts already is epoch time.
-                    "epoch_unix_ns": (
-                        camera_by_id[camera_id].epoch_unix_ns
-                        if camera_id in camera_by_id
-                        else None
-                    ),
-                    # WSL backend also anchors the monotonic clock so the
-                    # camera time axis can be compared to cap/timestamp_monotonic_ns
-                    # without going through the wall clock (which NTP can step).
-                    "epoch_monotonic_ns": (
-                        camera_by_id[camera_id].epoch_monotonic_ns
-                        if camera_id in camera_by_id
-                        else None
-                    ),
                     "error": camera_errors.get(camera_id),
                 }
                 video_entry = camera_videos.get(camera_id)
@@ -2567,12 +2479,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 },
                 "cameras": {
                     "enabled": bool(camera_slots),
-                    "backend": args.camera_backend,
-                    "timestamp_clock": (
-                        "host_unix_ns"
-                        if args.camera_backend == "linux"
-                        else "host_unix_ns (epoch_unix_ns + relative pts)"
-                    ),
+                    "backend": "linux",
+                    "timestamp_clock": "host_unix_ns",
                     "mode": (
                         "none"
                         if not camera_slots

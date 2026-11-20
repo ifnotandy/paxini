@@ -67,7 +67,7 @@ if args.view:
 
 **为什么危险**：manifest 是排障和验收的第一入口。空 `per_camera` 会让人以为
 "这次没录相机"，进而去查 ffmpeg、查带宽、重采——而实际数据在文件里躺着。
-`selftest` 覆盖不到：136 项里没有一项跑 `main()` 的 manifest 分支。
+`selftest` 覆盖不到：没有一项跑 `main()` 的 manifest 分支。
 
 **修法**：把 2265 行改成局部变量，别碰外层 `camera_ids`：
 

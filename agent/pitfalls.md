@@ -33,6 +33,9 @@
 
 ## 二、环境
 
+> **2026-11-20**：`main` 已删除 WSL 路径，本节里 usbipd / DirectShow 相关的条目
+> 只对 `archive/wsl-backend` 分支有效，保留是为了那天真要回去时别再踩一遍。
+
 ### `usbipd attach` 报 `already attached to a client`，WSL 里却没有 `/dev/ttyACM*`
 
 **现象**：`usbipd list` 手套那行是 `Attached`，`ls /dev/ttyACM*` 为空；再 `attach`
@@ -246,7 +249,7 @@ Ctrl+C 正好落在一次批量写中间，`RLock` 会让同一线程重入成�
 只有 `--view` 时才执行。`--help` 测不出来。
 
 **对策**：改了目录结构，除了 `--help`，还要跑一遍会用到的功能路径和
-`python3.10 selftest/selftest.py`（136 项能覆盖绝大部分 import 链）。
+`python3.10 selftest/selftest.py`（全过说明 import 链没问题）。
 
 ### 外面的脚本引用了里面的模块
 

@@ -35,7 +35,7 @@ ffmpeg 让每帧 pts 直接取主机墙钟并原样写进容器，停止后用 `
 |---|---|---|
 | `capture/` | 采集主程序与设备驱动层 | `collect_cap.py`（主）、`camera_ffmpeg.py`、`quest3.py` |
 | `calib/` | 手套零点标定（写设备存储；报告落 `calib/hand/`，不入库） | `hand_calib.py` |
-| `latency/` | 相机延迟测量 | `measure_camera_latency.py`（原生 Ubuntu / V4L2）、`measure_camera_latency_wsl.py`（WSL，相机走 DirectShow）；结果记在 `records/` |
+| `latency/` | 相机延迟测量 | `measure_camera_latency.py`（V4L2）；结果记在 `records/` |
 | `viewer/` | 可视化 | `visualize.py`（回放）、`quest_view.py`（Quest payload）、`live_view.py`（实时） |
 | `diagnostics/` | 时钟域诊断 | `quest_clock_probe.py`（C8 探针；产物落 `clock_probe/`） |
 | `selftest/` | 不接硬件的自检 | `selftest.py` |
@@ -62,14 +62,10 @@ python3.10 capture/collect_cap.py --list-devices
 `--list-devices` 打印串口（含 USB VID:PID 与 by-id）、视频设备和 ffmpeg 版本。
 先确认两件事：
 
-- **串口那行末尾是 `PXCap`（`USB=28e9:018a`）**。没有串口就回
-  [`../README.md` §2](../README.md#2-硬件接入) 重新 `usbipd attach`——
-  `usbipd list` 显示 `Attached` 也可能是早已失效的假象，判据只看 `/dev/ttyACM*`。
-- **视频设备按后端看**。日志打「相机后端：wsl」时列出的是 `DirectShow 视频设备`，
-  此时 **V4L2 采集节点为空属于正常**：相机留在 Windows 侧供 `ffmpeg.exe` 采，
-  不要为"补齐"去 `usbipd attach` 它。转发 UVC 会掉到 5 fps，且 `bind` 之后
-  Windows 侧 DirectShow 失去设备，采集在枚举阶段就退出。只有「相机后端：linux」
-  才该看到 V4L2 节点。
+- **串口那行末尾是 `PXCap`（`USB=28e9:018a`）**。没有串口就先查线缆、供电和
+  `dialout` 权限（`usermod -aG dialout $USER` 后要重新登录）。
+- **V4L2 节点数量对得上**。两路 MASTER Camera 应各有一个 `index 0` 采集节点；
+  一个都没有说明相机没被内核识别，先 `v4l2-ctl --list-devices` 看设备在不在。
 
 确认无误后再运行：
 
@@ -121,36 +117,26 @@ bash scripts/run_capture_noquest.sh -d 10 --dry-run  # 只做检查并打印命�
 bash scripts/run_capture_noquest.sh -- --video-codec h264   # 其余参数写在 -- 之后透传
 ```
 
-它比手工敲多了四层保护：找不到 `python3.10`/`PXCap3`、找不到 `ffmpeg` 或 `ffprobe`、
-WSL 里没有 `/dev/ttyACM0`、判定成 wsl 却没有 `ffmpeg.exe`，都会在启动前停下
-并给出该输入的命令；跑完自动打印帧数、实际帧率、视频体积与 `verify.row_mismatch`，
-校验不过退出码为 3（区别于环境问题的 2）。
-
-串口那一步会**自己重连**：WSL 发行版空闲约 60 秒（`vmIdleTimeout` 默认值）就会关闭，
-usbipd 的 attach 随之失效，而 `usbipd list` 仍显示 `Attached`。脚本不看状态列，只判断
-`/dev/ttyACM0` 在不在；不在就 `detach` → `attach` → 轮询节点最多 3 秒，最多试 5 轮。
-`detach` 之后设备会重新枚举，紧接着 `attach` 会报 `There is no device with busid`，
-所以必须先重试而不是判一次就放弃。busid 从 `usbipd list` 里按 `28e9:018a` 自动查，
-换机器或换 USB 口不用改脚本；要指定就 `USBIPD_BUSID=3-3 bash scripts/run_capture_noquest.sh`。
+它比手工敲多了三层保护：找不到 `python3.10`/`PXCap3`、找不到 `ffmpeg` 或 `ffprobe`、
+看不到手套串口或 `/dev/video*` 节点，都会在启动前停下并给出该输入的命令；跑完自动打印
+帧数、实际帧率、视频体积与 `verify.row_mismatch`，校验不过退出码为 3（区别于环境问题的 2）。
 
 脚本不写个人目录：ffmpeg 按 `$FFMPEG`、`PATH`、`/usr/local/bin` 等常见位置查找；
 找到后把它的目录加到 `PATH` 最前面，`ffprobe` 优先取同目录的那份。
 
 #### 换一台机器要改什么
 
-代码里的路径都相对**脚本所在目录**解析（`cap_config.yaml`、`../Recordings/`、
-`../sdk/ffmpeg-win/`），所以只要仓库结构不变就不用改代码。真正会挡住别人的是四件事：
+代码里的路径都相对**脚本所在目录**解析（`cap_config.yaml`、`../Recordings/`），
+所以只要仓库结构不变就不用改代码。真正会挡住别人的是三件事：
 
 | 项 | 本机现状 | 别人怎么办 |
 |---|---|---|
 | Python | 系统 `python3` 是 3.12，`PxCap3` 只在 `python3.10` 里 | 用 `python3.10`（或 `PYTHON=` 指定） |
 | 手套 SDK | `pxhandsdk 1.0.0.0` 已 `dpkg` 装 | 装 SDK + `setup-serial-access.sh` + 重登让 `dialout` 生效 |
-| 相机后端 | `cap_config.yaml` 是 `auto`，WSL 里判成 `wsl` | 不用改；要强制就填 `linux` / `wsl` 或加 `--camera-backend` |
-| `ffmpeg.exe` | `sdk/ffmpeg-win/ffmpeg.exe`，**不入库** | 从 `sdk/README.md` 给的地址下载，或改用 `linux` 后端 |
+| ffmpeg | 静态版已在 `PATH` 或 `$FFMPEG` | 5.0 以上，需带 `v4l2` 输入与 `-fps_mode` |
 
-另外 `usbipd attach --busid 3-3` 里的 `3-3` 是本机总线号，换机器会变——脚本已经改成按
-`28e9:018a` 自动查，手工敲则要先 `usbipd list`；DirectShow 设备名带 PnP 实例 ID
-（`vid_0c45&pid_000c...`），本程序每次自己枚举，换 USB 口不用改配置。
+相机走 `/dev/videoN`，节点序号可能随机（两路同型号尤其明显），所以默认 `auto` 每次
+自己枚举；要钉死就写 `--camera-0 /dev/video2 --camera-1 /dev/video0`。
 
 ## 2. 时间戳
 
@@ -160,7 +146,7 @@ usbipd 的 attach 随之失效，而 `usbipd list` 仍显示 `Attached`。脚本
 |---|---|---|
 | 手套 | SDK 每帧给 `timestamp_unix_ns` + `timestamp_monotonic_ns` | `cap/` 两列 |
 | Quest | SDK 给四个：`sdk_` / `body_` / `motion_` / `body_joints_timestamp_ns` | `quest/` 四列 |
-| 视频 | linux 后端：ffmpeg `-use_wallclock_as_timestamps 1` + `-copyts`；wsl 后端：`epoch_unix_ns` + DirectShow 相对 pts | `cameras/<id>/timestamp_unix_ns` |
+| 视频 | ffmpeg `-use_wallclock_as_timestamps 1` + `-copyts`，pts 本身就是墙钟 | `cameras/<id>/timestamp_unix_ns` |
 
 - 手套 120 Hz（`--hand-rate`，上限 300），Quest 轮询 120 Hz（`--quest-rate`）。
 - 相机默认 30 fps；**每路帧数 M 与手套帧数 N、Quest 行数 Q 互不相等**。
@@ -183,7 +169,7 @@ usbipd 的 attach 随之失效，而 `usbipd list` 仍显示 `Attached`。脚本
 sudo timedatectl set-ntp false      # 采完再 set-ntp true
 ```
 
-数据集要求严格时别在 WSL 里采，原生 Linux 上这个问题基本不存在。
+手套 120 Hz 与相机 30 fps 各跑各的，空洞由 §4.3 的跨度判据暴露。
 
 ## 3. Quest 数据
 
@@ -392,10 +378,10 @@ python3.10 capture/collect_cap.py --cap-side right --view --view-mode tk     # �
 
 | 环境 | 落点 | 原因 |
 |---|---|---|
-| WSL（WSLg） | `html` | WSLg 没有窗口管理器：Tk 窗口会被摆在屏幕右下、比屏幕还高，底部相机行出屏；被盖住后任务栏那条带 `[WARN:COPY MODE]` 前缀的条目也拉不回来 |
-| 原生 Linux（X11 / Wayland） | `tk` | 有正常 WM，窗口该多大就多大、任务栏能点击还原，窗口版更省事，不用切浏览器 |
+| 有图形会话（X11 / Wayland） | `tk` | 有正常 WM，窗口该多大就多大、任务栏能点击还原，窗口版更省事，不用切浏览器 |
+| 无显示会话（SSH、纯 tty、WSLg 这类无 WM 的合成器） | `html` | 没有窗口管理器时 Tk 窗口会被摆到屏幕外或压在别的东西后面，浏览器版不受影响 |
 
-判断方式是环境变量 `WSL_DISTRO_NAME` 或 `/mnt/wslg` 是否存在（见
+判断方式是 `DISPLAY` / `WAYLAND_DISPLAY` 是否存在（无显示会话时退回 `html`，判定见
 `live_view.running_under_wslg()`）。两种模式的内容完全一样，只是壳不同。
 
 **`html` 模式**：启动时打印 `http://127.0.0.1:8765/`（端口被占自动顺延），页面每 150 ms
@@ -436,7 +422,7 @@ HTTP 服务、页面、JPEG 缓冲、MJPEG 连接全在子进程里。两处细�
 
 - 实现是给**录制那条 ffmpeg 加第二个输出**：`-map 0:v -vf fps=5,scale=360:-2 -c:v mjpeg
   -f image2pipe pipe:1`，主进程读 stdout、按 SOI/EOI 切出完整 JPEG，只保留最新一帧。
-  另起一条 ffmpeg 抢同一路相机是不行的——DirectShow 独占，第二路直接打不开
+  另起一条 ffmpeg 抢同一路相机是不行的——V4L2 设备被占用时第二路直接打不开
 - 抽到 5 fps 是刻意的：窗口本来 20 Hz 刷新，全帧率既看不出来又白烧 CPU。实测预览
   **5.0 fps、1.0~1.2 KB/帧**，两路合计约 12 KB/s
 - 读管道跑在独立线程里不断排水，否则管道写满会把 ffmpeg 卡住，**录制跟着停**
@@ -521,13 +507,11 @@ view: false              # 采集时开实时窗口
 | `--camera-start-timeout` | `15` | 等待相机出帧超时 |
 | `--camera-ready-samples` | `3` | 启动前每路要求的连续新帧数 |
 | `--video-codec` | `copy` | `copy`（MJPEG 直通）/`h264`/`hevc`/`mjpeg` |
-| `--camera-backend` | `auto` | `auto` 按运行环境判定：WSL → `wsl`，原生 Linux → `linux`；也可强制 `linux` / `wsl` |
-| `--ffmpeg-win` | `sdk/ffmpeg-win/ffmpeg.exe` | Windows 版 ffmpeg 路径，仅 `wsl` 后端用 |
 | `--duration` | `0` | 采集秒数，0 表示到 Ctrl+C |
 | `--output-dir` | — | 默认 `<Paxini-Cap>/Recordings/data_<日期>_<序号>` |
 | `--omit-distribution` | 关 | 不写 444 点分布力 |
 | `--view` / `--no-view` | `false` | 采集时开实时视图；配置文件可设 `view: true` |
-| `--view-mode` | `auto` | `auto` = WSL 用 `html`、原生 Linux 用 `tk`；`html` = 本地页面 `http://127.0.0.1:8765/`（fork 子进程，端口由子进程绑定后回报）；`tk` = matplotlib 独立子进程窗口 |
+| `--view-mode` | `auto` | `auto` = 有显示会话用 `tk`、没有则用 `html`；`html` = 本地页面 `http://127.0.0.1:8765/`（fork 子进程，端口由子进程绑定后回报）；`tk` = matplotlib 独立子进程窗口 |
 | `--view-fps` | `20` | 实时窗口刷新率（`tk` 模式） |
 | `--view-video` / `--no-view-video` | `true` | 实时窗口底部显示相机关键帧（5 fps 抽帧，走录制 ffmpeg 的第二路输出） |
 | `--view-video-fps` | `5` | 实时预览的抽帧帧率 |
@@ -542,85 +526,44 @@ view: false              # 采集时开实时窗口
 ffmpeg/ffprobe 从 `PATH` 找，也认环境变量 `FFMPEG`。不使用统一系统路径时，
 先执行 `export FFMPEG=/path/to/ffmpeg-5-or-newer`。
 
-### 6.3 相机后端：linux / wsl
+### 6.3 相机：只有 V4L2
 
-两条路采同一批相机，区别只在谁读 USB：
+一条路径：ffmpeg 直接读 `/dev/videoN`，加 `-use_wallclock_as_timestamps 1`，容器里的
+pts 本身就是墙钟纳秒，不需要事后锚定。设备写 `/dev/video0`，停止用 SIGINT。
 
-| | `linux` | `wsl` |
-|---|---|---|
-| ffmpeg | Linux 静态版，`-f v4l2` | Windows `ffmpeg.exe`，`-f dshow` |
-| 设备写法 | `/dev/video0` | `video=@device_pnp_\\?\usb#vid_...` |
-| 720p30 实测 | 30 fps（原生 Linux） | 30 fps |
-| 经 usbipd | **5 fps** | 不适用 |
-| pts | 墙钟（`-use_wallclock_as_timestamps`） | 从 0 起，靠 `epoch_unix_ns` 换算 |
-| 停止方式 | SIGINT | stdin 发 `q` |
+> 2026-11-20 删除了 WSL / DirectShow 路径。那条路要相机留在 Windows、由 WSL 调
+> `ffmpeg.exe` 走 `-f dshow`；usbipd 转发 UVC 会丢等时包，720p 从 30 fps 掉到 5 fps。
+> 需要它时 checkout `archive/wsl-backend` 分支，恢复步骤见仓库根的 `ARCHIVED.md`。
 
-**WSL 里必须用 `wsl`。** usbipd 转发 UVC 会丢等时包，驱动日志刷 `Dropping payload
-(out of sync)`，720p 从 30 fps 掉到 5 fps（实测）。这个掉速与厂商软件、曝光、分辨率
-协商都无关，换 Windows 原生采集立刻恢复。
+**延迟 Δ 必须在本条路径上重测。** WSL 时代测出的 192.3 ms 里含 DirectShow 缓冲；
+V4L2 的 pts 就是墙钟，Δ 通常只有几十毫秒。两个数不可互换 —— 拿错了时间轴会整体平移
+一百多毫秒，而行数、间隔、单调性全都正常，看不出错。
 
-不用手工选。配置里是 `auto`：
+测法：
 
-```json
-{ "camera_backend": "auto" }
+```bash
+python3.10 latency/measure_camera_latency.py      # 默认逐路测 cam0 与 cam1
 ```
 
-启动时按运行环境判定，并在日志里打印落点：
-
-```text
-[INFO] 相机后端：wsl（auto 判定：WSL 环境）
-```
-
-同一个仓库拿到原生 Ubuntu 机器上自动变成 `linux`，不用改配置。要强制某条路径时，
-命令行 `--camera-backend linux|wsl` 或配置文件写死都行。
-
-`wsl` 后端要一份 Windows 版 ffmpeg，放在 `sdk/ffmpeg-win/ffmpeg.exe`（不入库，
-见 [`../sdk/README.md`](../sdk/README.md)），或用 `--ffmpeg-win` 指定。
-
-**时间戳的差别**：DirectShow 拒绝 `-use_wallclock_as_timestamps`，pts 只能从 0 起。
-采集端在 ffmpeg 启动后轮询输出文件，首个字节落盘的瞬间记 `epoch_unix_ns`（WSL
-墙钟），写进 manifest。读法：
-
-```text
-帧的绝对时刻 = cameras.<id>.epoch_unix_ns + pts
-```
-
-`epoch` 的精度取决于"首字节落盘"与"首帧曝光"的差 —— 这是个可以直接测的量。
-[`latency/measure_camera_latency_wsl.py`](latency/measure_camera_latency_wsl.py)
-用屏幕二维码对时。本机（WSL 路径）2026-11-16 同一天连测三次：
-
-| 序号 | 中位数 | IQR | 说明 |
-|---|---|---|---|
-| 1 | 189.71 ms | 5.17 | 正常 |
-| 2 | 287.22 ms | 4.82 | 整体高 95 ms（≈3 帧），重测后恢复 |
-| 3 | 192.30 ms | 6.12 | 正常 |
-
-三次的 IQR 都在 5~6 ms，抖动一直很小，**变的是整条链路**（DirectShow 缓冲从 1 帧
-涨到 3~4 帧就是这个量级）。所以不要记死一个数：**每次测完自动写进
-[`latency/records/`](latency/records/)，下游读最近一次的合格值**，见 §6.4。
-
-**这个数只适用于 WSL 路径。** 原生 Ubuntu（V4L2）的 pts 本身就是墙钟，没有
-锚点那一段，Δ 通常只有几十毫秒，要用
-[`latency/measure_camera_latency.py`](latency/measure_camera_latency.py) 单独测。
-两个数不可互换，拿错了时间轴会整体平移一百多毫秒，而行数、间隔、单调性全都正常。
+结果自动写进 `latency/records/<电脑用户>-ubuntu.yaml`，下游读最近一次合格值，见 §6.4。
 
 ### 6.4 测量结果台账
 
-两个测量脚本跑完都会往 `latency/records/<电脑用户>-<win|ubuntu>.yaml` 追加一条，
+测量脚本跑完都会往 `latency/records/<电脑用户>-ubuntu.yaml` 追加一条，
 **一台机器一个文件**，键是测量序号：
 
 ```yaml
-machine: andy-win
-platform: win
-backend: wsl
+machine: ifnot-ubuntu
+platform: ubuntu
+backend: linux
 measurements:
   1:
-    at: '2026-11-16T21:04:54+08:00'
+    at: '2026-11-20T20:00:00+08:00'
     camera: 0
-    median_ms: 189.712      # 修正量：时间轴减掉这么多
-    iqr_ms: 5.17
-    samples: 213
-    ok: true                # 样本 ≥ 30、IQR ≤ 40 ms，直接用
+    median_ms: 42.7         # 修正量：时间轴减掉这么多
+    iqr_ms: 3.1
+    samples: 240
+    ok: true                # 样本 ≥ 30、IQR ≤ 40 ms、漂移 ≤ 10 ms，直接用
 ```
 
 下游读法：
@@ -630,9 +573,8 @@ import sys
 sys.path.insert(0, "<repo>/Paxini-Cap/Cap_Quest/latency")
 from latency_records import load_records, pick_latest
 
-# 不给路径 = 本机这份；WSL 里跑会自去找 <user>-win.yaml
-entry = pick_latest(load_records(), camera=0)
-median = entry["median_ms"]            # 192.3
+entry = pick_latest(load_records(), camera=0)   # 本机最近一次合格的 cam0
+median = entry["median_ms"]
 ```
 
 - `pick_latest` 默认跳过 `ok: false` 的记录；两路相机延迟不同，`camera` 必须指明。
@@ -642,10 +584,7 @@ median = entry["median_ms"]            # 192.3
   给出与上一条同参数记录的差值，超过 20 ms 会当场提醒。
 - 每个 `latency_measure/<时间戳>_*/` 目录仍是本次的完整产物（逐帧 CSV、直方图、
   录制的 mkv），台账里 `output_dir` 指回去；这些产物不入库，`output_dir` 只在本机有效。
-
-**不要拿另一个系统的时钟去换算。** WSL 与 Windows 的墙钟不一定对齐：本机 2026-11-16
-实测差 0.3 ms，但历史记录里出现过 1.61 s（NTP 没同步时就会这样）。稳妥做法是在同一个
-时钟域里取两个时刻相减，或者先量一次两边的差再换算。
+- `latency/records/archive/andy-win.yaml` 是 WSL 路径的历史台账，**只作证据，不要取数**。
 
 ## 7. 常见问题
 
@@ -657,13 +596,13 @@ ls -l /dev/serial/by-id/ /dev/ttyACM* /dev/ttyUSB* 2>/dev/null
 
 | 现象 | 原因与处理 |
 |---|---|
-| `未发现可用的串口` | 手套没转发进 WSL、线缆松动、不在 dialout 组；先 `usbipd attach` |
+| `未发现可用的串口` | 线缆松动、供电不足、不在 `dialout` 组；`als -l /dev/ttyACM*` 先确认节点本身在 |
 | `检测到多个串口` | 有别的 CDC 设备；用 `--hand-port` 指定 |
-| 相机节点为 0 | usbipd 没 attach；两路 UVC 需分别 attach |
+| 相机节点为 0 | 内核没识别到 UVC；`v4l2-ctl --list-devices` 与 `dmesg | tail` 对照 |
 | `等待 PXCap camX 摄像头画面超时` | 分辨率/帧率不被支持，先降到 640x480 / 15 fps |
 | `时间戳不是墙钟时间` | ffmpeg 太老或命令被改；确认 `-use_wallclock_as_timestamps 1` |
 | 一直"尚未收到 PXCap 连续采集帧" | 串口占用、回调异常；看 manifest 的 `snapshot_errors` |
-| 相机 `actual_fps` 明显低于 30 | usbipd 带宽不够；降分辨率或只录一路 |
+| 相机 `actual_fps` 明显低于 30 | USB 带宽不够（两路 720p30 挂在同一个 Hub 上很常见）；换端口或降分辨率 |
 | 采集频率低于目标 | 看 `hand.callback_max_ms` 与 `queue_overflows`；降 `--hand-rate` |
 
 ## 8. 已知限制
@@ -706,10 +645,10 @@ ls -l /dev/serial/by-id/ /dev/ttyACM* /dev/ttyUSB* 2>/dev/null
 | 项 | 结果 |
 |---|---|
 | `py_compile` / `pyflakes` | 全过，0 告警 |
-| `selftest.py` | **136 项全过**（在原有覆盖之外增加 C8 时钟探针、sdk_unix 报告与当前文件质量门控、Quest 独立时间轴/sequence 降级和失败工件） |
+| `selftest.py` | **全过**（2026-11-20 删除 WSL 用例后项数会变，以运行输出为准）（在原有覆盖之外增加 C8 时钟探针、sdk_unix 报告与当前文件质量门控、Quest 独立时间轴/sequence 降级和失败工件） |
 | `--list-devices` | 正常输出串口 / V4L2 节点 / ffmpeg |
 | 无设备时报错 | 退出码 **2**，保留 `startup_failure.json`，不创建 `data.h5` |
-| 相机延迟测量（WSL 路径） | 三次实测 189.71 / 287.22 / 192.30 ms，IQR 5~6 ms；台账 `latency/records/andy-win.yaml` |
+| 相机延迟测量 | **原生 V4L2 路径尚未实测**；WSL 时代的 189.71 / 287.22 / 192.30 ms 已归档到 `latency/records/archive/andy-win.yaml`，不能沿用 |
 | 假 SDK 驱动真实主循环（python3.10，5 秒） | 602 行、**120.0 Hz**、`verify` 为空、`alignment: none` |
 | 回调耗时（60 秒合成帧） | 均值 0.21 ms、最大 0.62 ms |
 | 文件体积（合成数据） | 3.6 KB/行 ≈ 1.57 GB/小时（120 Hz，444 点全量） |
@@ -727,9 +666,9 @@ ls -l /dev/serial/by-id/ /dev/ttyACM* /dev/ttyUSB* 2>/dev/null
   模型只吃图像、不算位姿，四组量（内参/双相机外参/手套→相机/Quest→相机）都没有使用场景，
   见 [`../DOC/待验证清单.md`](../DOC/待验证清单.md) E8。代价是指尖三维位置、深度、
   跨源空间对齐都不成立，汇报里不许写。
-- **原生 Ubuntu 的延迟测量没在真机跑过**：`measure_camera_latency.py` 只过了编译、
-  `--list` 与合成视频验证（设定 42.7 ms 还原 42.7 ms），这台机器只有 WSL，没有
-  `/dev/video*`。
+- **相机延迟 Δ 在原生 Ubuntu 上尚未实测**：`measure_camera_latency.py` 只过了编译、
+  `--list` 与合成视频验证（设定 42.7 ms 还原 42.7 ms）。WSL 时代那三次实测来自
+  DirectShow 路径，已归档，不能当 V4L2 的值用。
 - **手套零点标定的写操作没有真机记录**：`hand_calib.py` 写完但只在离线下验证（`selftest`
   7 项）。真机只跑过只读的 `info`（2026-11-16 21:02，SN `DCG04R48500093`）：4 路编码器
   0.011 / 0.253 / 0.137 / 0.352°，10 路合力最大 0.2 N，故障 0 项——**零点本身是准的**。

@@ -7,20 +7,17 @@
 #            collect_cap.py，不要用这个脚本。
 #
 # 【它做的事】等价于手工依次执行下面这些命令，只是每步都先检查、失败即停：
-#             export PATH="$HOME/bin:$PATH"
+#             export FFMPEG=/path/to/ffmpeg-5-or-newer
 #             sudo timedatectl set-ntp false
-#             usbipd detach --busid 3-3 && usbipd attach --wsl --busid 3-3
 #             python3.10 capture/collect_cap.py --no-quest --cap-side right
 #             采完读 manifest.json 打印摘要并检查 verify.row_mismatch
 #
-#            usbipd 那步只在 /dev/ttyACM0 不存在时才做（WSL 空闲约 60 秒会关掉，
-#            attach 随之失效）；busid 自动从 usbipd list 里按 28e9:018a 查，
-#            也可以用 USBIPD_BUSID=3-3 覆盖。
+#            相机只走 V4L2，手套直接接在主机串口上（2026-11-20 删除了 WSL/USBIP 路径）。
 #
 # 【用法】（下面几条都在 Cap_Quest/ 根目录执行，脚本自己会 cd 到 capture/）
 #   bash scripts/run_capture_noquest.sh                  一直采，Ctrl+C 停（只按一次）
 #   bash scripts/run_capture_noquest.sh -d 60            采 60 秒
-#   bash scripts/run_capture_noquest.sh -d 60 --view     边采边看（要 WSLg 或物理显示器）
+#   bash scripts/run_capture_noquest.sh -d 60 --view     边采边看（要物理显示器或 X 转发）
 #   bash scripts/run_capture_noquest.sh -d 10 --dry-run  只打印将要执行的命令，不启动
 #   bash scripts/run_capture_noquest.sh -- --video-codec h264     透传未列出的参数
 #
@@ -93,37 +90,11 @@ PATH="$(dirname -- "$FFMPEG_BIN"):$PATH"
 export PATH
 printf '  ffmpeg  %s\n  ffprobe %s\n' "$FFMPEG_BIN" "$FFPROBE_BIN"
 
-# 相机后端预检。wsl 路径要一份 Windows 版 ffmpeg.exe（不入库）；linux 路径要
-# /dev/video* 节点。配置里是 auto 时按运行环境判定，换机器最容易在这里踩空。
-# 判定逻辑只有一份：直接问程序，别在这里复刻一遍（auto 的落点会变）。
-BACKEND="$("$PY" -c '
-import os, sys, yaml
-sys.path.insert(0, sys.argv[1])
-from camera_ffmpeg import resolve_backend
-path = sys.argv[2]
-requested = "auto"
-if os.path.isfile(path):
-    with open(path, encoding="utf-8") as handle:
-        requested = (yaml.safe_load(handle) or {}).get("camera_backend") or "auto"
-print(resolve_backend(requested))
-' "$QUEST_ROOT/capture" "$QUEST_ROOT/cap_config.yaml" 2>/dev/null || echo linux)"
-if [ "$BACKEND" = "wsl" ]; then
-  WIN_FFMPEG="${FFMPEG_WIN:-$(cd "$QUEST_ROOT/.." && pwd)/sdk/ffmpeg-win/ffmpeg.exe}"
-  if [ -f "$WIN_FFMPEG" ]; then
-    printf '  相机后端 wsl，ffmpeg.exe %s\n' "$WIN_FFMPEG"
-  else
-    printf '  [!] 相机后端是 wsl，但没找到 %s\n' "$WIN_FFMPEG"
-    printf '  [!] 先补上它（或用 FFMPEG_WIN 指定），否则会卡在相机起不来\n'
-  fi
-else
-  printf '  相机后端 linux，/dev/video* 节点 %s 个\n' "$(ls /dev/video* 2>/dev/null | wc -l)"
-fi
+# 相机预检：这条路径只有 V4L2，/dev/video* 不存在就别往下跑。
+printf '  /dev/video* 节点 %s 个\n' "$(ls /dev/video* 2>/dev/null | wc -l)"
 
-# --- 3/6 手套串口（必要时自动 detach/attach）--------------------------------
-# 只转发手套；相机在 WSL 路径下走 Windows DirectShow，不需要 usbipd。
-# WSL 发行版空闲约 60 秒（vmIdleTimeout 默认）就会关掉，attach 跟着失效，而
-# usbipd list 仍显示 Attached —— 所以这里不看状态列，只认 /dev/ttyACM0 在不在，
-# 不在就当场重连，省掉每次手工 detach/attach。
+# --- 3/6 手套串口 -----------------------------------------------------------
+# 手套直接接在主机串口上；节点不在就是线缆、供电或 dialout 权限的问题。
 step 3/6 "手套串口"
 
 find_port() {
@@ -139,38 +110,10 @@ find_port() {
 
 PORT="$(find_port || true)"
 if [ -z "$PORT" ]; then
-  USBIPD="$(command -v usbipd.exe 2>/dev/null || true)"
-  if [ -z "$USBIPD" ]; then
-    fail "看不到手套串口，也没有 usbipd.exe。原生 Linux 主机请检查线缆与 dialout 权限"
-  fi
-  BUSID="${USBIPD_BUSID:-}"
-  if [ -z "$BUSID" ]; then
-    BUSID="$("$USBIPD" list 2>/dev/null | awk '/28e9:018a/ {print $1; exit}')"
-  fi
-  if [ -z "$BUSID" ]; then
-    fail "usbipd 列表里没有 28e9:018a：手套没插好，或 USB 口换了（可用 USBIPD_BUSID 指定 busid）"
-  fi
-  echo "  WSL 里没有串口节点，重连 usbipd（busid $BUSID）..."
-  # detach 之后设备会重新枚举，紧接着 attach 会报 "There is no device with
-  # busid"，所以必须重试；每次 attach 后轮询节点最多 3 秒。
-  "$USBIPD" detach --busid "$BUSID" >/dev/null 2>&1 || true
-  for attempt in 1 2 3 4 5; do
-    ATTACH_OUT="$("$USBIPD" attach --wsl --busid "$BUSID" 2>&1 || true)"
-    for _ in 1 2 3 4 5 6; do
-      PORT="$(find_port || true)"
-      [ -n "$PORT" ] && break
-      sleep 0.5
-    done
-    [ -n "$PORT" ] && break
-    echo "  第 $attempt 次 attach 未生效：$(printf '%s' "$ATTACH_OUT" | tail -1)"
-    sleep 1
-  done
-  if [ -z "$PORT" ]; then
-    fail "自动重连失败，请手工执行：usbipd detach --busid $BUSID 再 usbipd attach --wsl --busid $BUSID"
-  fi
-  echo "  已重新连接"
+  fail "看不到手套串口。检查 USB 线缆与 dialout 权限（usermod -aG dialout 后要重新登录）"
 fi
-printf '  %s\n' "$PORT"
+printf '  %s
+' "$PORT"
 
 # --- 4/6 墙钟校时 -----------------------------------------------------------
 # 采集中途跳秒会污染相机时间戳（实测不关时 20 秒跳 2201 ms）。

@@ -9,15 +9,15 @@
 | 任务 | 文件 | 具体位置 | 怎么验 |
 |---|---|---|---|
 | 增删 HDF5 数据集 | `capture/collect_cap.py` | `CAP_DATASETS`(:551) | `selftest` + 同步 `DOC/HDF5结构说明.md` |
-| 改 `quest/` 的列 | `capture/collect_cap.py` | `_quest_layout()`(:642) | `selftest` 的 "Quest 行" 组 |
-| 加命令行参数 | `capture/collect_cap.py` | `build_parser()`(:1265) | `--help` 对照 + 补 `cap_config.yaml` |
-| 改配置加载/优先级 | `capture/collect_cap.py` | `load_config_file()`(:1664)、`apply_config()`(:1693) | `selftest` 的 "配置" 组 |
+| 改 `quest/` 的列 | `capture/collect_cap.py` | `_quest_layout()`(:638) | `selftest` 的 "Quest 行" 组 |
+| 加命令行参数 | `capture/collect_cap.py` | `build_parser()`(:1261) | `--help` 对照 + 补 `cap_config.yaml` |
+| 改配置加载/优先级 | `capture/collect_cap.py` | `load_config_file()`(:1644)、`apply_config()`(:1673) | `selftest` 的 "配置" 组 |
 | 改采集输出位置 | `capture/collect_cap.py` + `scripts/run_capture_noquest.sh` | `CAP_ROOT` / `DEFAULT_OUTPUT_ROOT`(:95) 与脚本里的 `RECORDINGS_ROOT` | **两处必须同时改**；改完 `--help` 看默认值，再跑脚本确认摘要找到新目录 |
 | 单只手套左右手选择 | `capture/collect_cap.py` | `HAND_SIDES`、`build_parser()`、`resolve_pose_side()`、`main()` | `selftest` 的 "手别选择" 组 |
 | 启动失败诊断 | `capture/collect_cap.py` | `write_startup_failure()`、`main()` 的 `finally` | `selftest` 的 "启动失败工件" 组 |
-| 采集主循环节拍 | `capture/collect_cap.py` | `pump_and_record()`(:1955) | 跑一次采集看 `manifest.row_mismatch` |
-| 回调线程入队 | `capture/collect_cap.py` | `snapshot_cap_frame()`(:320) | 只做拷贝，别在这里写盘 |
-| 批量落盘策略 | `capture/collect_cap.py` | `Hdf5Recorder.write_cap()`(:701)、`flush_cap()`(:718) / `_flush_cap_locked()`、`FLUSH_ROWS` | flush 时机影响中途读文件的结果 |
+| 采集主循环节拍 | `capture/collect_cap.py` | `pump_and_record()`(:1912) | 跑一次采集看 `manifest.row_mismatch` |
+| 回调线程入队 | `capture/collect_cap.py` | `snapshot_cap_frame()`(:316) | 只做拷贝，别在这里写盘 |
+| 批量落盘策略 | `capture/collect_cap.py` | `Hdf5Recorder.write_cap()`(:697)、`flush_cap()`(:714) / `_flush_cap_locked()`、`FLUSH_ROWS` | flush 时机影响中途读文件的结果 |
 | 终止时落盘 | 同上 | `emergency_save()`(:982)、`emergency_save_and_exit()`(:211) | `selftest` 的"收尾/紧急落盘"三项 |
 
 **并发模型（改这里之前必读）**：`Hdf5Recorder` 用一把**非重入** `Lock` 串行化所有 HDF5
@@ -28,11 +28,10 @@
   / `_close_locked` / `_manifest_locked` 这些"已持锁"版本，否则死锁
 - `flush_cap` 先把这一批的数组全部构造完再统一 `resize`：中途抛异常时数据集都停在旧行数，
   不会出现"前 4 个数据集多 100 行、后 3 个没有"的错位
-| 相机完整的 ffmpeg 命令 | `capture/camera_ffmpeg.py` | `FfmpegCamera.command()`(:489) | 两后端各跑一次 `--list-devices` |
+| 相机完整的 ffmpeg 命令 | `capture/camera_ffmpeg.py` | `FfmpegCamera.command()`(:344) | V4L2 下跑一次 `--list-devices` |
 | 相机启动就绪检测 | `capture/camera_ffmpeg.py` | `FfmpegCamera.progress_signal()`、`wait_for_cameras_ready()` | 兼容 `frame` / `out_time_us` / `total_size` |
-| epoch 锚定（wsl 后端） | `capture/camera_ffmpeg.py` | `_watch_first_frame()`(:581) | 跑 `latency/` 量出来的值 |
-| 每帧时间戳回填 | `capture/camera_ffmpeg.py` | `probe()`(:815) → `probe_frames()`(:303) | 采集后看 `cameras/*/timestamp_unix_ns` 是否单调 |
-| 设备枚举 | `capture/camera_ffmpeg.py` | `discover_video_nodes()`(:201) / `discover_windows_cameras()`(:116) | `--list-devices` |
+| 每帧时间戳回填 | `capture/camera_ffmpeg.py` | `probe()`(:307) → `probe_frames()`(:178) | 采集后看 `cameras/*/timestamp_unix_ns` 是否单调 |
+| 设备枚举 | `capture/camera_ffmpeg.py` | `discover_video_nodes()`(:74) | `--list-devices` |
 | Quest 连接与样本 | `capture/quest3.py` | `XrtReader.collect_sample()` | `selftest` 的 "Quest 采集" 组 |
 | Quest C8 时钟探针 | `diagnostics/quest_clock_probe.py` | `run_probe()`(:286)、`evaluate_clock_samples()`(:130) | `selftest` 的 "C8 探针" 组；产物落 `clock_probe/` |
 | 回放窗口 | `viewer/visualize.py` | `collect_payload()`(:380) → `run_window()`(:549) / `write_viewer()`(:966) | `--save-png` 出一张 |
@@ -94,7 +93,7 @@ PXCap3 回调(120Hz) → snapshot_cap_frame 拷贝入队 → pump_and_record 主
                                                         ↓
                               Hdf5Recorder.write_cap 攒 100 行批量写
                                                         ↓
-ffmpeg.exe -f dshow(30fps) → mkv + epoch/pts → probe() 回填绝对时间戳
+ffmpeg -f v4l2(30fps, 墙钟 pts) → mkv → probe() 回填逐帧时间戳
                                                         ↓
                                             data.h5 + manifest.json
 ```

@@ -12,7 +12,7 @@ Paxini-Cap/
 │   ├── latency/            # 延迟测量：两个脚本 + records/ 台账（一台机器一个文件）
 │   ├── viewer/             # 回放与实时视图
 │   ├── diagnostics/        # Quest 时间戳时钟域探针（不写 data.h5）
-│   ├── selftest/           # 不接硬件的自检，136 项
+│   ├── selftest/           # 不接硬件的自检（项数以运行输出为准）
 │   ├── scripts/            # 一键采集脚本
 │   └── cap_config.yaml     # 可选配置（存在即加载，命令行优先）
 ├── Recordings/         # 采集输出（data_<日期>_<序号>/），采集端与 Paxini-Align 共用
@@ -32,7 +32,7 @@ Paxini-Cap/
 │   └── camera.py           # 单路相机录 N 秒，ffprobe 回读；复用 camera_ffmpeg.py
 ├── sdk/                # deb 包 + SHA256SUMS + 安装说明（二进制不入库）
 │   ├── xrobotoolkit/       # Quest 端 APK
-│   └── ffmpeg-win/         # Windows 版 ffmpeg.exe（camera_backend: wsl 用）
+│   └── ffmpeg-win/         # 历史遗留：WSL 路径用的 Windows ffmpeg.exe（main 不再用）
 ├── requirements.txt
 └── README.md
 ```
@@ -43,7 +43,7 @@ Paxini-Cap/
 时间戳时钟域尚未确认，因此跨源绝对时间对齐仍不能成立。相机标定**已决定不做**
 （E8，下游扩散模型只吃图像、不解算位姿）；标定不做，任何"距离 / 位置 / 三维"的
 结论都不成立。逐项状态见 §6 与 [`DOC/待验证清单.md`](DOC/待验证清单.md)。
-136 项 `selftest.py` 只覆盖纯逻辑
+`selftest.py` 只覆盖纯逻辑
 （帧解析、行轴、配置、视图挂钩）；**下游配对已有代码**：`Paxini-Align/` 把手套流按相机
 帧时刻重采样，并在通过 C8 后可选对齐 Quest（见 §5）。
 
@@ -79,10 +79,9 @@ Paxini-Cap/
 6. **`DOC/HDF5结构说明.md` 被用户手动编辑过**，只能定点修改，禁止整份重写。
 7. **改 `cap/` 或 `quest/` 的布局必须升 `format_version`**（当前 `4`），并在
    `HDF5结构说明.md` 的版本变更表里写清改了什么。下游按版本号判断怎么读。
-8. **WSL 里相机不能走 V4L2。** usbipd 转发 UVC 会丢等时包，720p 从 30 fps 掉到
-   5 fps，且与曝光、分辨率、厂商软件都无关。`camera_backend: auto` 已经按运行环境
-   判好了（WSL → wsl），除非要强制，不用手工填。两条路径的技术对比见
-   [`Cap_Quest/README.md` §6.3](Cap_Quest/README.md)。
+8. **相机只有 V4L2 一条路。** 不要把相机经 USB/IP 转发给虚拟机或容器：UVC 的等时包
+   会被丢，720p 从 30 fps 掉到 5 fps；同理也不能让两路 720p30 挤在同一个 Hub 上。
+   想在 Windows 上采集只能回 `archive/wsl-backend` 分支，不要往 main 上加回现场。
 
 ### 0.2 代码地图
 
@@ -91,7 +90,7 @@ Paxini-Cap/
 | 增删 HDF5 字段 | `collect_cap.py` 的 `CAP_DATASETS` / `_quest_layout()`，再同步文档和 selftest |
 | 加命令行参数 | `build_parser()` + `cap_config.yaml` + `Cap_Quest/README.md` 参数表 |
 | 回放窗口 / HTML | `visualize.py`（`collect_payload` 读+抽稀，`run_window`/`write_viewer` 两个出口） |
-| 采集时实时视图 | `live_view.py`：`HtmlLiveView`（fork 子进程 + 队列，WSL 默认）／`LiveView`（fork 子进程的 Tk 窗口，原生 Linux 默认） |
+| 采集时实时视图 | `live_view.py`：`HtmlLiveView`（fork 子进程 + 队列，无显示会话时用）／`LiveView`（fork 子进程的 Tk 窗口，默认） |
 | 视频采集与 pts 回填 | `camera_ffmpeg.py` |
 | Quest 连接与样本读取 | `quest3.py` |
 | 采集主循环节拍 | `collect_cap.py` 的 `pump_and_record` |
@@ -104,13 +103,10 @@ Paxini-Cap/
 
 ### 0.3 环境坑（都踩过）
 
-- **Git Bash 会把 `/` 开头的参数改写成 Windows 路径**：调 WSL 时加
-  `MSYS_NO_PATHCONV=1`，否则 `/mnt/c/...` 会变成 `G:/WorkBuddy/...`。
-- **`sudo` 要密码**，本机没配免密。`wsl.exe` 里用 `echo <pw> | sudo -S`。
+- **`sudo` 要密码**，本机没配免密；批量命令用 `echo <pw> | sudo -S`，或先配免密。
 - **matplotlib 只认 `Noto Sans CJK JP`**，没有 Mono 版。等宽中文会整片变方框，
   表格类布局别用 `family="monospace"`。
 - **Write 工具产出 CRLF**，仓库其余文件都是 LF，提交前统一一次。
-- **WSL 的 `/tmp` 和 Windows 临时目录不是一回事**，跨端传文件走 `/mnt/c/...`。
 - 没有 `python3.10-tk` 时开不了窗口，用 `visualize.py --html`。
 
 ### 0.4 改完必须过的三关
@@ -119,7 +115,7 @@ Paxini-Cap/
 cd Cap_Quest
 python3.10 -m py_compile capture/*.py viewer/*.py selftest/*.py latency/*.py calib/*.py
 python3.10 -m pyflakes capture/*.py viewer/*.py selftest/*.py latency/*.py calib/*.py
-python3.10 selftest/selftest.py          # 应为 136 项全过
+python3.10 selftest/selftest.py          # 应为全过
 ```
 
 - 改数据结构或行为，**必须加 selftest 用例**，不能只靠手跑
@@ -131,14 +127,13 @@ python3.10 selftest/selftest.py          # 应为 136 项全过
 
 | 项 | 要求 |
 |---|---|
-| 系统 | WSL Ubuntu 24.04（SDK 标称 22.04，24.04 实测可用） |
+| 系统 | Ubuntu 22.04 / 24.04（原生安装，不用 WSL） |
 | Python | **`python3.10`**。系统 `python3` 是 3.12，此时 `import pxhandsdk` 能过但 `hasattr(pxhandsdk,"PxCap3")` 为 False |
 | 手套 SDK | `pxhandsdk 1.0.0.0`，`dpkg -i` 装到 `/usr/lib/python3/pxhandsdk` |
 | Python 包 | `numpy` / `h5py` / `xrobotoolkit-sdk`，用 `python3.10 -m pip install --user` |
 | 回放 | `matplotlib`（随 requirements 装）；窗口模式还要 `python3.10-tk`，`--html` 不需要 |
 | ffmpeg | 需要带 `v4l2` 输入和 `-fps_mode` 的版本（5.0+）。系统未提供时，把静态版目录加入 `PATH`，或通过 `FFMPEG` 指定 |
-| ffmpeg（Windows） | `sdk/ffmpeg-win/ffmpeg.exe`，只在 `camera_backend: wsl` 时用。不入库，见 [`sdk/README.md`](sdk/README.md) |
-| USB 转发 | Windows 侧 `usbipd` 把设备 attach 进 WSL |
+| ffmpeg | 5.0 以上，需带 `v4l2` 输入与 `-fps_mode`；系统没装就用静态版并通过 `$FFMPEG` 指定 |
 
 不要用 `python3.10 -m venv`：这个环境里 ensurepip 会失败，直接用系统 3.10 加
 `--user` 装包。
@@ -167,10 +162,9 @@ ps -eo pid,cmd | grep '[R]oboticsServiceProcess'
 
 `runService.sh` 自己设置动态库、Qt 插件和 QML 路径，并以后台进程启动
 `RoboticsServiceProcess`。不要只运行 `RoboticsServiceProcess`，也不要运行 `run3D.sh`
-（WSL 没有显示环境时会失败）。PC Service 监听 `*:63901` 和 `127.0.0.1:60061`；
-Quest 跟踪数据通过局域网进入前者。若主机是 WSL2，默认 NAT 不保证头显能直接访问
-WSL 内的服务，需要让 PC Service 对局域网可达（例如使用 WSL mirrored networking，
-或在 Windows 侧配置端口转发），同时放行 Windows 防火墙。
+（没有显示环境时会失败）。PC Service 监听 `*:63901` 和 `127.0.0.1:60061`；
+Quest 跟踪数据通过局域网进入前者，所以头显和主机必须在同一个可达网段，主机防火墙
+要放行 63901。
 
 安装并确认 Python SDK 可用：
 
@@ -194,34 +188,20 @@ PC Service、Quest Wi-Fi、APK 的 Tracking/Send 开关和手柄唤醒状态。
 
 ## 2. 硬件接入
 
-**只有手套进 WSL，相机全程留在 Windows。** 相机走 USB/IP 转发会丢等时包，
-720p 从 30 fps 掉到 5 fps（§0.1 第 8 条）；更糟的是 `bind` 会把 UVC 驱动换成
-usbipd 的 stub，Windows 侧 DirectShow 立刻失去这两路设备，`camera_backend: wsl`
-的采集在枚举阶段就起不来。
+**所有设备都直接接在 Ubuntu 主机上**：两路相机走 UVC（`/dev/video*`），手套走 USB CDC
+串口（`/dev/ttyACM*`）。2026-11-20 删除了 WSL 路径——那条路把相机留在 Windows、由 WSL
+调 `ffmpeg.exe`，只存在于 `archive/wsl-backend` 分支，见仓库根 `ARCHIVED.md`。
 
-```powershell
-usbipd list
-usbipd bind   --busid <手套的 BUSID>              # 仅首次，之后一直有效
-usbipd attach --wsl --busid <手套的 BUSID>        # WSL 每次重启后都要重来
-# 相机不要 bind，也不要 attach
-```
-
-- 手套按 **USB VID:PID `28e9:018a`** 识别，不依赖 `/dev/ttyACM0` 编号
-  （重插会变）。程序同时扫 `ttyACM*`、`ttyUSB*` 和 `/dev/serial/by-id`。
-- `usbipd list` 显示 `Attached` **不代表** WSL 里还能用：WSL 空闲约 60 s 自动关机，
-  USB/IP 会话随之断开而状态列不更新。判据只看 `ls /dev/ttyACM*`。
-- 节点为空时再 `attach` 会被直接拒绝：`Device with busid '3-3' is already attached
-  to a client`。**先 `usbipd detach --busid <BUSID>`，再 `attach`**，重复 attach 无效。
-  `detach` 后设备会重新枚举，紧接着的 `attach` 常报 `There is no device with
-  busid`，等 1~2 秒重试同一条命令即可。
-- 反复报 `already attached` 说明它还挂在另一个活着的 WSL 会话上：`wsl --shutdown`
-  关掉全部实例后重新 `attach`。这会杀掉 WSL 里所有正在跑的任务。
-- 相机的发现方式按后端分：`wsl` 后端从 Windows 侧枚举 DirectShow 名字，
-  V4L2 节点为空是正常的；`linux` 后端（原生 Ubuntu，相机直接插本机）才按
-  `/sys/class/video4linux/video*` 的 `index == 0` 节点发现（UVC 还会多一个
-  metadata 节点），按 `device` 的 realpath 去重、排序后映射 cam0/cam1。
-- 原生 Ubuntu 上两路 UVC 同时采 720p30 约 20 MB/s，是整条链路最容易出问题的地方：
-  先用 `--camera-fps 15` 或 640x480 验证。
+- 手套按 **USB VID:PID `28e9:018a`** 识别，不依赖 `/dev/ttyACM0` 编号（重插会变）。
+  程序同时扫 `ttyACM*`、`ttyUSB*` 和 `/dev/serial/by-id`。
+- 相机按 `/sys/class/video4linux/video*` 的 `index == 0` 节点发现（UVC 还会多一个
+  metadata 节点），按 `device` 的 realpath 去重、排序后映射 cam0/cam1。两路同型号相机
+  的节点序号可能互换，要求稳定就显式写 `--camera-0 /dev/video2 --camera-1 /dev/video0`。
+- 两路 UVC 同时采 720p30 约 20 MB/s，是整条链路最容易出问题的地方：先确认它们不要
+  挂在同一个 USB 3.0 Hub 上（2026-11-18 遇到过整个 Hub 在取流后被复位），再用
+  `--camera-fps 15` 或 640×480 做首轮验证。
+- 串口没权限是 `dialout` 组的问题，装完 SDK 跑一次
+  `sudo /usr/share/pxhandsdk/scripts/setup-serial-access.sh` 并重新登录。
 
 ## 3. 安装（只做一次）
 
@@ -233,7 +213,7 @@ sudo /usr/share/pxhandsdk/scripts/setup-serial-access.sh
 python3.10 -m pip install --user -r requirements.txt
 ```
 
-装完先跑 §0.4 的三关：`selftest` 136 项全过说明环境没问题，此时不需要插硬件。
+装完先跑 §0.4 的三关：`selftest` 全过说明环境没问题，此时不需要插硬件。
 
 **验证设备与日常运行不在本文档**：`--list-devices`、采集、`--view`、一键脚本、回放、
 参数表全在 [`Cap_Quest/README.md` §1](Cap_Quest/README.md)。采前关 NTP、
@@ -245,7 +225,7 @@ python3.10 -m pip install --user -r requirements.txt
 **结论：采集链路可用，跨源分析不可用。**
 
 真机（手套 + 双路相机）2026-11-13 已跑通，逐帧无丢帧、关 NTP 后时钟零跳变；
-2026-11-18 Quest XRoboToolKit 左手联合采集也已跑通。不接硬件时 `selftest` 136 项
+2026-11-18 Quest XRoboToolKit 左手联合采集也已跑通。不接硬件时 `selftest`
 全过。但下面三处边界仍决定哪些结论成立：
 
 | 缺口 | 状态 | 后果 |

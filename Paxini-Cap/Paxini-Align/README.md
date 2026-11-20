@@ -64,7 +64,7 @@ python align_capture.py <目录> --dry-run
 ```
 
 本机没有 `python3.10` 的 h5py 时，用装了 h5py 的那个解释器（例如
-`C:\Users\Andy\AppData\Local\Programs\Python\Python312\python.exe`）；WSL 里
+`C:\Users\Andy\AppData\Local\Programs\Python\Python312\python.exe`）；Ubuntu 上
 `python3.10` 装好 `requirements.txt` 就能直接跑。
 
 产物：`<采集目录>/aligned/aligned_<参考相机>.h5`。

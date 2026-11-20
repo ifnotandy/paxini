@@ -64,7 +64,7 @@ data.h5
 > 三个来源的时钟域、换算方式、坑，统一整理在 [`时间戳说明.md`](时间戳说明.md)。
 > 本节只回答"哪些字段是时间戳、谁打的"。
 
-手套用 pxhandsdk 帧结构里的两个读数，Quest 用 xrobotoolkit SDK 的四个读数，相机用 V4L2/ffmpeg 的 pts（`wsl` 后端则用 `epoch_unix_ns` 平移，见 §5.2）。
+手套用 pxhandsdk 帧结构里的两个读数，Quest 用 xrobotoolkit SDK 的四个读数，相机用 V4L2/ffmpeg 的 pts（`wsl` 后端的 `epoch_unix_ns` 平移已随该后端于 2026-11-20 删除，见 `ARCHIVED.md`）。
 
 ![手套帧的时间戳来自 SDK](figures/timestamp-frame.svg)
 
@@ -202,8 +202,8 @@ Recordings/data_20261111_1/          # 在 Paxini-Cap 根下，不在 Cap_Quest 
 
 | 数据集 | 形状 | 类型 | 含义 |
 |---|---|---|---|
-| `timestamp_unix_ns` | (M,) | int64 | 该路全部视频帧的绝对墙钟，严格递增。`linux` 后端直接是 pts；`wsl` 后端是 `epoch_unix_ns + pts`，见 §5.2 |
-| `timestamp_monotonic_ns` | (M,) | int64 | **仅 `wsl` 后端**。同一批帧在单调钟上的绝对时刻（`epoch_monotonic_ns + pts`），与 `cap/timestamp_monotonic_ns` 同域，免疫 NTP 跳变。`linux` 后端不创建此数据集 |
+| `timestamp_unix_ns` | (M,) | int64 | 该路全部视频帧的绝对墙钟，严格递增。`linux` 后端直接是 pts；`wsl` 后端曾用 `epoch_unix_ns + pts`（已删） |
+| `timestamp_monotonic_ns` | (M,) | int64 | **仅已删除的 `wsl` 后端**。main 上不创建此数据集。原文：同一批帧在单调钟上的绝对时刻（`epoch_monotonic_ns + pts`），与 `cap/timestamp_monotonic_ns` 同域，免疫 NTP 跳变。`linux` 后端不创建此数据集 |
 
 就这两列（`linux` 后端只有第一列）。**没有 `frame_index`、没有 `skew_ns`**——配对在采集端已经全部移除。
 
@@ -265,7 +265,7 @@ WSL 里相机必须走 Windows 的 `ffmpeg.exe`（usbipd 转发 UVC 会丢等时
 | `pose`                         | 主位姿来源、分量顺序、坐标系说明                                                              |
 | `hand`                         | 单只手套手别 `side`、Quest 请求手别 `pose_side_requested`、串口、SN、SDK/固件版本、故障、回调耗时、队列溢出 |
 | `quest`                        | `enabled`、`timestamp_source`、`timestamp_fields`、`rows`、`samples_dropped`、轮询次数 |
-| `cameras`                      | `backend`、每路设备节点、`epoch_unix_ns`、帧数、分辨率、实际 fps、时间窗、错误 |
+| `cameras`                      | `backend`（固定 `linux`）、每路设备节点、帧数、分辨率、实际 fps、时间窗、错误 |
 | `verify`                       | 行数自检结果（`row_mismatch` 必须为空）                                                   |
 | `env`                          | python / numpy / h5py / ffmpeg 版本                                             |
 

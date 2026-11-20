@@ -80,6 +80,7 @@ Paxini-Dex/   会运动
 不会，而且**这是刻意设计**，不是没做完。三条行轴行数永远不相等，配对属于下游。
 历史上有过一版对齐代码，被整体删除了。
 
-**3. 以为 WSL 里能直接读相机。**
-不能。WSL 里相机要走 Windows 的 `ffmpeg.exe` + DirectShow；`camera_backend: auto` 已经
-按环境判好了，日志会打印落点。usbipd 转发 UVC 会让 720p 从 30 fps 掉到 5 fps。
+**3. 以为相机能经 USB/IP 转发。**
+不能。UVC 的等时包经 usbipd 转发会丢，720p 从 30 fps 掉到 5 fps。2026-11-20 起 `main`
+只有原生 V4L2 一条路，WSL/DirectShow 版本冻结在 `archive/wsl-backend`；别把相机转发进
+虚拟机或容器。

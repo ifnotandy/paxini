@@ -471,53 +471,53 @@ def test_quest3_sample() -> None:
 
 
 def test_camera_monotonic(tmp_root: Path) -> None:
-    """WSL backend writes a monotonic column; Linux backend leaves it absent."""
+    """The monotonic column is optional: written only when the caller has one."""
     from collect_cap import Hdf5Recorder
 
     base = 1_700_000_000_000_000_000
 
-    # WSL backend: both columns
-    wsl_dir = tmp_root / "cam_wsl"
-    with Hdf5Recorder(wsl_dir, "head", "right", "right", ("cam0",), True) as rec:
+    # Caller has a monotonic clock: both columns
+    mono_dir = tmp_root / "cam_mono"
+    with Hdf5Recorder(mono_dir, "head", "right", "right", ("cam0",), True) as rec:
         info = rec.write_camera_timestamps(
             "cam0",
             [base, base + 33_000_000],
             monotonic_ns=[10_000_000_000, 10_033_000_000],
         )
-    with h5py.File(wsl_dir / "data.h5", "r") as f:
+    with h5py.File(mono_dir / "data.h5", "r") as f:
         group = f["cameras/cam0"]
         check(
-            "相机单调钟/wsl 两列都在",
+            "相机单调钟/带单调钟时两列都在",
             "timestamp_unix_ns" in group and "timestamp_monotonic_ns" in group,
             list(group.keys()),
         )
         check(
-            "相机单调钟/wsl monotonic 内容",
+            "相机单调钟/monotonic 内容",
             list(group["timestamp_monotonic_ns"][:])
             == [10_000_000_000, 10_033_000_000],
             str(list(group["timestamp_monotonic_ns"][:])),
         )
     check(
-        "相机单调钟/wsl manifest 标记",
+        "相机单调钟/带单调钟时 manifest 标记",
         info.get("monotonic_available") is True
         and info.get("first_timestamp_monotonic_ns") == 10_000_000_000,
         str(info),
     )
 
-    # Linux backend: only unix, monotonic dataset must not exist
-    linux_dir = tmp_root / "cam_linux"
+    # Caller has no monotonic clock: the dataset must not exist
+    linux_dir = tmp_root / "cam_unix_only"
     with Hdf5Recorder(linux_dir, "head", "right", "right", ("cam0",), True) as rec:
         info = rec.write_camera_timestamps("cam0", [base, base + 33_000_000])
     with h5py.File(linux_dir / "data.h5", "r") as f:
         group = f["cameras/cam0"]
         check(
-            "相机单调钟/linux 无 monotonic 列",
+            "相机单调钟/无单调钟时不建该列",
             "timestamp_unix_ns" in group
             and "timestamp_monotonic_ns" not in group,
             list(group.keys()),
         )
     check(
-        "相机单调钟/linux manifest 标记",
+        "相机单调钟/无单调钟时 manifest 标记",
         info.get("monotonic_available") is False,
         str(info),
     )
@@ -1099,113 +1099,52 @@ def test_startup_failure(tmp_root: Path) -> None:
     )
 
 
-def test_camera_backend(tmp_root: Path) -> None:
-    """The two camera backends must produce different, correct commands."""
-    from unittest import mock
+def test_camera_command(tmp_root: Path) -> None:
+    """The V4L2 command line, progress parsing, and explicit device nodes."""
+    from camera_ffmpeg import FfmpegCamera
+    from collect_cap import resolve_camera_devices
 
-    from camera_ffmpeg import FfmpegCamera, to_windows_path
-
-    check(
-        "相机后端/路径转 Windows",
-        to_windows_path("/mnt/c/a/b.mkv") == "C:\\a\\b.mkv"
-        and to_windows_path("/dev/video0") == "/dev/video0",
-        to_windows_path("/mnt/c/a/b.mkv"),
-    )
-
-    linux_cam = FfmpegCamera(
+    cam = FfmpegCamera(
         "cam0", "/dev/video0", tmp_root, 1280, 720, 30.0, "copy",
-        "/usr/bin/ffmpeg", backend="linux",
+        "/usr/bin/ffmpeg",
     )
-    linux_cmd = linux_cam.command()
+    cmd = cam.command()
     check(
-        "相机后端/linux 用 v4l2 与墙钟",
-        "v4l2" in linux_cmd
-        and "-use_wallclock_as_timestamps" in linux_cmd
-        and "/dev/video0" in linux_cmd
-        and not any("dshow" in part for part in linux_cmd),
-        " ".join(linux_cmd[:6]),
+        "相机命令/用 v4l2 与墙钟",
+        "v4l2" in cmd
+        and "-use_wallclock_as_timestamps" in cmd
+        and "/dev/video0" in cmd
+        and "-nostdin" in cmd,
+        " ".join(cmd[:6]),
     )
-    linux_cam.progress_path.parent.mkdir(parents=True, exist_ok=True)
-    linux_cam.progress_path.write_text(
+    check(
+        "相机命令/不含 DirectShow 参数",
+        not any("dshow" in part for part in cmd),
+        " ".join(part for part in cmd if "dshow" in part),
+    )
+    cam.progress_path.parent.mkdir(parents=True, exist_ok=True)
+    cam.progress_path.write_text(
         "total_size=262144\nout_time_us=1000000\nprogress=continue\n",
         encoding="utf-8",
     )
-    progress_without_frame = linux_cam.progress_signal()
-    linux_cam.progress_path.write_text(
+    progress_without_frame = cam.progress_signal()
+    cam.progress_path.write_text(
         "frame=7\ntotal_size=524288\nout_time_us=2000000\nprogress=continue\n",
         encoding="utf-8",
     )
     check(
-        "相机后端/stream-copy 无 frame 时按出流时间判进度",
-        progress_without_frame == 30
-        and linux_cam.progress_signal() == 7,
-        f"fallback={progress_without_frame} frame={linux_cam.progress_signal()}",
+        "相机命令/stream-copy 无 frame 时按出流时间判进度",
+        progress_without_frame == 30 and cam.progress_signal() == 7,
+        f"fallback={progress_without_frame} frame={cam.progress_signal()}",
     )
 
-    with mock.patch(
-        "camera_ffmpeg.find_windows_ffmpeg", return_value="C:\\ffmpeg.exe"
-    ):
-        wsl_cam = FfmpegCamera(
-            "cam0", "video=@device_pnp_A", tmp_root, 1280, 720, 30.0, "copy",
-            "/usr/bin/ffmpeg", backend="wsl", windows_ffmpeg="C:\\ffmpeg.exe",
-        )
-    wsl_cmd = wsl_cam.command()
+    args = build_parser().parse_args(["--camera-0", "/dev/video2"])
+    devices = resolve_camera_devices(args, ("cam0",), [])
     check(
-        "相机后端/wsl 用 dshow 且不用墙钟参数",
-        "dshow" in wsl_cmd
-        and "-use_wallclock_as_timestamps" not in wsl_cmd
-        and "-nostdin" not in wsl_cmd
-        and "video=@device_pnp_A" in wsl_cmd,
-        " ".join(wsl_cmd[:6]),
-    )
-    check(
-        "相机后端/wsl 输出路径是 Windows 格式",
-        any(part.startswith("C:\\") for part in wsl_cmd),
-        " ".join(part for part in wsl_cmd if ":" in part),
-    )
-
-    wsl_args = build_parser().parse_args(
-        ["--camera-backend", "wsl", "--camera-0", "video=@device_pnp_A"]
-    )
-    from collect_cap import resolve_camera_devices
-
-    devices = resolve_camera_devices(wsl_args, ("cam0",), ["video=@device_pnp_A"])
-    check(
-        "相机后端/wsl 设备名不被当路径改写",
-        devices["cam0"] == "video=@device_pnp_A",
+        "相机命令/显式设备节点保留路径",
+        devices["cam0"] == "/dev/video2",
         devices["cam0"],
     )
-
-    default_args = build_parser().parse_args([])
-    check(
-        "相机后端/默认 auto",
-        default_args.camera_backend == "auto",
-        default_args.camera_backend,
-    )
-
-    from camera_ffmpeg import resolve_backend
-
-    with mock.patch("camera_ffmpeg.running_in_wsl", return_value=True):
-        resolved = resolve_backend("auto")
-    check("相机后端/auto 在 WSL 判成 wsl", resolved == "wsl", resolved)
-
-    with mock.patch("camera_ffmpeg.running_in_wsl", return_value=False):
-        resolved = resolve_backend("auto")
-    check("相机后端/auto 在原生判成 linux", resolved == "linux", resolved)
-
-    check(
-        "相机后端/显式值不被 auto 覆盖",
-        resolve_backend("linux") == "linux" and resolve_backend("wsl") == "wsl",
-        f'{resolve_backend("linux")}/{resolve_backend("wsl")}',
-    )
-
-    try:
-        resolve_backend("dshow")
-    except RuntimeError:
-        rejected = True
-    else:
-        rejected = False
-    check("相机后端/未知值报错", rejected, "RuntimeError" if rejected else "未报错")
 
 
 def test_visualize_video(tmp_root: Path) -> None:
@@ -1303,14 +1242,11 @@ def test_camera_preview(tmp_root: Path) -> None:
         " ".join(quiet.command()),
     )
 
-    with mock.patch(
-        "camera_ffmpeg.find_windows_ffmpeg", return_value="C:\\ffmpeg.exe"
-    ):
-        live = FfmpegCamera(
-            "cam0", "video=@device_pnp_A", tmp_root, 1280, 720, 30.0, "copy",
-            "/usr/bin/ffmpeg", backend="wsl", windows_ffmpeg="C:\\ffmpeg.exe",
-            preview_fps=5.0, preview_width=360,
-        )
+    live = FfmpegCamera(
+        "cam0", "/dev/video0", tmp_root, 1280, 720, 30.0, "copy",
+        "/usr/bin/ffmpeg",
+        preview_fps=5.0, preview_width=360,
+    )
     command = live.command()
     check(
         "实时预览/开启后多一路 image2pipe",
@@ -1631,10 +1567,10 @@ def main() -> int:
         run_case("手别选择", test_pose_side_selection, tmp_root)
         run_case("启动失败工件", test_startup_failure, tmp_root)
         if shutil.which("ffprobe"):
-            run_case("相机后端", test_camera_backend, tmp_root)
+            run_case("相机命令", test_camera_command, tmp_root)
             run_case("相机预览", test_camera_preview, tmp_root)
         else:
-            skip("相机后端 / 相机预览", "本机找不到 ffprobe（这两组验的是 ffmpeg 命令拼装，需要在装好 ffmpeg+ffprobe 的环境跑）")
+            skip("相机命令 / 相机预览", "本机找不到 ffprobe（这两组验的是 ffmpeg 命令拼装，需要在装好 ffmpeg+ffprobe 的环境跑）")
         run_case("可视化", test_visualize, tmp_root)
         run_case("Quest 可视化", test_quest_view, tmp_root)
         run_case("C8 时钟探针", test_clock_probe_report)

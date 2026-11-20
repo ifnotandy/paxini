@@ -43,7 +43,6 @@ PXCap III 数据手套与 PXDex III 灵巧手的开发工作区。两条线，�
 
 | 文件 | 放回位置 |
 |---|---|
-| `ffmpeg.exe` | `Paxini-Cap/sdk/ffmpeg-win/` |
 | `pxhandsdk_*.deb` | `Paxini-Cap/sdk/` |
 | `XRoboToolkit_PC_Service_*.deb` | `Paxini-Cap/sdk/` |
 | `XRoboToolkit-Quest-*.apk` | `Paxini-Cap/sdk/xrobotoolkit/` |
@@ -53,10 +52,10 @@ PXCap III 数据手套与 PXDex III 灵巧手的开发工作区。两条线，�
 
 ## 环境
 
-Python 3.10 + Ubuntu 22.04/24.04，或 Windows + WSL2。手套 SDK 只能用 `python3.10`，
+Python 3.10 + Ubuntu 22.04/24.04（原生安装）。手套 SDK 只能用 `python3.10`，
 系统自带的 3.12 加载不出 `PxCap3`。
 
-版本要求、`dpkg` 安装顺序、`usbipd` 转发规则、ffmpeg 从哪来 —— 全在
+版本要求、`dpkg` 安装顺序、串口权限、ffmpeg 从哪来 —— 全在
 [`Paxini-Cap/README.md` §1–§2](Paxini-Cap/README.md)。
 
 ## 版本库说明

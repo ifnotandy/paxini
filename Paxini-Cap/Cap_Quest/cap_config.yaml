@@ -9,13 +9,12 @@ cap_side: left           # 单只手套手别 left|right；决定相机命名与
 
 # ---------------------------------------------------------------- 相机
 camera_mode: both        # both / cam0 / cam1 / none；none 不启动 ffmpeg
-camera_0: auto           # auto 或 /dev/videoN；wsl 后端填 DirectShow 名
+camera_0: auto           # auto 或 /dev/videoN
 camera_1: auto           # 同上。两路填成同一个设备会互相抢占
 camera_width: 1280       # 必须是设备支持的模式，否则 ffmpeg 起不来
 camera_height: 720
 camera_fps: 30
 video_codec: copy        # copy 直通（CPU≈0）/ h264 / hevc / mjpeg
-camera_backend: auto     # auto：WSL 判成 wsl、原生 Ubuntu 判成 linux
 
 # ---------------------------------------------------------------- Quest
 pose_source: controller  # controller / hand / head
@@ -26,7 +25,7 @@ no_quest: false          # true = 只采手套与相机，quest 组写 NaN
 # ---------------------------------------------------------------- 体积与视图
 omit_distribution: false # true = 不写 10×119×3 分布力，体积降到几 MB/h
 view: false              # 采集时开实时视图（只读内存，不碰 data.h5）
-view_mode: auto          # auto / html / tk；auto 在 WSL 里选 html
+view_mode: auto          # auto / html / tk；无显示器时选 html
 view_fps: 20             # 只对 tk 模式生效，html 固定 150 ms 轮询
 view_video: true         # 视图里显示相机关键帧（走录制 ffmpeg 的第二路输出）
 view_video_fps: 5        # 预览抽帧帧率，调高会多占 ffmpeg 的 CPU

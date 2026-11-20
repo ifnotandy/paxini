@@ -76,7 +76,7 @@
 
 ### 7. 不要跨系统时钟域做减法
 
-**规则**：一个时间差里的两个时刻，必须在同一侧取。WSL 取就都用 WSL，Windows 取就
+**规则**：一个时间差里的两个时刻，必须在同一侧取。跨机取就都从同一台机器取，容器里取就
 都用 Windows。
 
 **为什么**：WSL 与 Windows 的墙钟差**不是常数** —— 历史测到 1610 ms，2026-11-16
@@ -158,10 +158,10 @@ Cap，违反约束 1。
 **规则**：`python3.10 -m venv` 在这个环境里 ensurepip 会失败。一律
 `python3.10 -m pip install --user`。
 
-### 14. WSL 里相机不能走 V4L2
+### 14. 相机只有 V4L2 一条路（2026-11-20 起）
 
-**规则**：不能用 usbipd 转发 UVC 给 Linux 侧。`camera_backend: auto`（默认）在 WSL
-里会判成 `wsl`，把相机留给 Windows 的 `ffmpeg.exe`；不要为了「统一」手工改成 `linux`。
+**规则**：不能把 UVC 经 USB/IP 转发给虚拟机或容器——等时包会丢，720p 从 30 fps 掉到
+5 fps。采集必须由直接插着相机的那台 Linux 主机自己做。
 
 **违反了会怎样**：720p 从 30 fps 掉到 5 fps，驱动日志刷
 `Dropping payload (out of sync)`。与曝光、分辨率、厂商软件都无关，调参数无效。

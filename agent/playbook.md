@@ -14,7 +14,7 @@ export FFMPEG=/path/to/ffmpeg-5-or-newer
 python3.10 capture/collect_cap.py --list-devices    # 串口末尾应是 PXCap
 
 # 2) 不接硬件先自检
-python3.10 selftest/selftest.py                     # 136 项
+python3.10 selftest/selftest.py                     # 全过
 
 # 3) 关 NTP（必须）
 sudo timedatectl set-ntp false
@@ -33,7 +33,7 @@ python3.10 capture/collect_cap.py --cap-side right --no-quest
 | 现象 | 先查这个 |
 |---|---|
 | `SERIAL_BUSY(102)` | 串口被占：关掉 PXCap Studio、`hand_calib.py`、旧进程 |
-| 找不到串口 | `ls /dev/ttyACM*`；空就重跑 `usbipd attach`；再不行查 `dialout` 组 |
+| 找不到串口 | `ls /dev/ttyACM*`；空就查线缆、供电与 `dialout` 组（改了组要重新登录） |
 | `import pxhandsdk` 成功但没 `PxCap3` | 用成 3.12 了，换 `python3.10` |
 | 相机 0 fps / 5 fps | 日志里的「相机后端」是不是被强制成 `linux` 了 |
 | 相机 20 秒不出图 | 先 `--camera-mode cam0` 排除带宽；再验分辨率是否被支持 |
@@ -68,16 +68,8 @@ python3.10 capture/collect_cap.py --cap-side right --no-quest
 
 | 采集路径 | 脚本 | 帧时间戳的构成 | 实测量级 |
 |---|---|---|---|
-| WSL（相机借 Windows 的 ffmpeg.exe / DirectShow） | `latency/measure_camera_latency_wsl.py` | `epoch_unix_ns + 相对 pts` | 约 190 ms，主要是显示与 DirectShow 缓冲 |
+| 原生 V4L2（当前唯一路径） | `latency/measure_camera_latency.py` | pts 即墙钟 | **尚未实测**；WSL 时代的 192.3 ms 不可沿用 |
 | 原生 Ubuntu（ffmpeg / V4L2） | `latency/measure_camera_latency.py` | 墙钟 pts 本身，无锚点 | 几十毫秒 |
-
-Windows：
-
-```powershell
-cd <repo>\Paxini-Cap\Cap_Quest
-python `
-  latency\measure_camera_latency_wsl.py --repeat 3
-```
 
 Ubuntu：
 
@@ -140,7 +132,7 @@ python3.10 viewer/visualize.py ../Recordings/data_20261113_9 --save-png a.png
 cd Paxini-Cap/Cap_Quest
 python3.10 -m py_compile capture/*.py viewer/*.py selftest/*.py latency/*.py calib/*.py
 python3.10 -m pyflakes  capture/*.py viewer/*.py selftest/*.py latency/*.py calib/*.py
-python3.10 selftest/selftest.py                      # 136 项（加过用例会更多）
+python3.10 selftest/selftest.py                      # 全过（项数以运行输出为准）
 ```
 
 三关都过再提交。改过行为或数据结构，`selftest` 必须加用例，不能只靠手跑过一遍。
