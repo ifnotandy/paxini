@@ -675,5 +675,6 @@ def wait_for_cameras_ready(
     raise RuntimeError(
         f"等待 PXCap {camera_text} 摄像头画面超时（已出帧：{details}）。"
         "请检查 --list-devices 的节点、--camera-width/--camera-height 是否被"
-        "设备支持，以及两路 UVC 同时走 usbipd 时的带宽"
+        "设备支持，以及两路 720p30 是否挤在同一个 USB Hub 上（约 20 MB/s，"
+        "带宽不够会掉帧或起不来）"
     )

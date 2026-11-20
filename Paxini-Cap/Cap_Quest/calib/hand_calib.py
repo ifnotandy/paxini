@@ -175,7 +175,7 @@ def resolve_hand_port(requested: str, dev_root: Path = Path("/dev")) -> str:
     ports = discover_hand_ports(dev_root)
     if not ports:
         fail(
-            "未发现可用串口。请检查手套 USB 线缆、usbipd 转发与 dialout 权限，"
+            "未发现可用串口。请检查手套 USB 线缆、供电与 dialout 权限，"
             "或用 --hand-port /dev/ttyACM0 指定"
         )
 
