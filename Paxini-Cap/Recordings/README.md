@@ -47,8 +47,9 @@
 - ModelScope 数据集（2026-11-20 已上传，**当前仍是私有仓**）：
   <https://www.modelscope.cn/datasets/yanglab/paxini>
 
-  内容：`data_20261117_{1,2,3}.zip` + `SHA256SUMS.txt` + `README.md`（数据集卡片）。
-  三份 zip 已回读校验：`sha256sum -c SHA256SUMS.txt` 三个 `OK`，且与本地原件逐字节相同。
+  内容：`data_20261117_{1,2,3}.zip` + `data_20261118_1.zip` + `SHA256SUMS.txt` +
+  `README.md`（数据集卡片）。四份 zip 已回读校验：`sha256sum -c SHA256SUMS.txt`
+  四条全 `OK`，且与本地原件逐字节相同。
 
   这是**内部专用**仓（2026-11-20 决定）：私有是刻意设置，不是没配好。组织成员登录后
   可下载，匿名访问返回「不存在的数据集」属预期。将来要对外分发，先改公开
@@ -77,10 +78,13 @@ python tools/upload_modelscope.py --upload                # 真传
 - 产物是 `<recordings>/.upload_staging/`：每份一个 `<目录名>.zip`（内部根节点是
   目录名本身）+ 一份 `SHA256SUMS.txt`（`sha256sum -c` 格式）。zip 用 STORED
   不压缩——里面是 mkv 和 h5，deflate 只省 2% 却要全程 CPU。
+- `SHA256SUMS.txt` 描述的是**整个仓库**：`--upload` 时先读远端已有的 zip 列表，
+  和本次打包的合并后再写，所以分几次上传也不会把早先的条目冲掉。
 - 已有的 zip 只要比目录新就复用，`--rebuild` 强制重打。
 - 令牌走 `--token` 或环境变量 `MODELSCOPE_API_TOKEN`
-  （<https://modelscope.cn/my/myaccesstoken>）；两者都没有时用本机
-  `~/.modelscope/` 里的登录态。**令牌不要写进仓库**。
+  （<https://modelscope.cn/my/myaccesstoken>），**两者都没有会直接报错退出**。
+  `~/.modelscope/credentials` 里只有 cookies / session / 截断的 `git_token`，
+  `login()` 不接受，别指望它兜底。**令牌不要写进仓库**。
 - 上传只覆盖同名文件，不会删远端已有的 `README.md`（数据集卡片仍手工维护）。
 - 脚本会自己建 staging 目录，不用手工建；`.upload_staging/` 与 `*.zip` 都在
   `.gitignore` 里。

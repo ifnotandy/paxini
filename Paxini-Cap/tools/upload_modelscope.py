@@ -29,6 +29,7 @@ import sys
 import zipfile
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 DEFAULT_REPO = "yanglab/paxini"
 STAGING_NAME = ".upload_staging"
@@ -155,11 +156,46 @@ def write_sums(staging: Path, archives: list[Path]) -> Path:
     return path
 
 
+def write_sums(staging: Path, entries: dict[str, str]) -> Path:
+    path = staging / SUMS_NAME
+    lines = [f"{digest}  {name}" for name, digest in sorted(entries.items())]
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    log(f"  写入 {SUMS_NAME}（{len(lines)} 条：{', '.join(sorted(entries))}）")
+    return path
+
+
+def local_sums(archives: list[Path]) -> dict[str, str]:
+    return {archive.name: sha256_file(archive) for archive in archives}
+
+
+def remote_zip_sums(api: Any, repo_id: str, token: str) -> dict[str, str]:
+    """Best-effort sha256 of the zips already in the repo, as ``{name: sha}``.
+
+    ``SHA256SUMS.txt`` describes the whole repository, but a run only knows the
+    zips it just built. Without this merge, uploading one session would shrink
+    the manifest to a single line and silently drop the other entries.
+    """
+    try:
+        items = api.get_dataset_files(repo_id, recursive=False, token=token)
+    except Exception as exc:  # noqa: BLE001 - the merge is a nice-to-have
+        warn(f"读不到远端文件列表（{exc}），本次 {SUMS_NAME} 只含本次打包的 zip")
+        return {}
+    sums: dict[str, str] = {}
+    for item in items:
+        name = item.get("Path") if isinstance(item, dict) else getattr(item, "Path", None)
+        digest = item.get("Sha256") if isinstance(item, dict) else getattr(item, "Sha256", None)
+        if not name or not digest or not name.endswith(".zip"):
+            continue
+        sums[str(name)] = str(digest)
+    return sums
+
+
 def do_upload(
     staging: Path,
     repo_id: str,
-    token: str | None,
+    token: str,
     commit_message: str,
+    archives: list[Path],
 ) -> None:
     try:
         from modelscope.hub.api import HubApi
@@ -171,16 +207,18 @@ def do_upload(
 
     api = HubApi()
     try:
-        if token:
-            api.login(token)
-        else:
-            # modelscope falls back to its own cached credential at ~/.modelscope
-            api.login()
+        # login() 在 1.40 里必须拿到 token：~/.modelscope/credentials 下只有
+        # cookies / session / git_token（截断版），不能直接当 SDK 令牌用。
+        api.login(token)
     except Exception as exc:  # noqa: BLE001 - surface whatever the SDK said
-        raise SystemExit(
-            f"ModelScope 登录失败：{exc}。用 --token 或环境变量 "
-            "MODELSCOPE_API_TOKEN 提供访问令牌（https://modelscope.cn/my/myaccesstoken）。"
-        ) from exc
+        raise SystemExit(f"ModelScope 登录失败：{exc}") from exc
+
+    merged = remote_zip_sums(api, repo_id, token)
+    before = len(merged)
+    merged.update(local_sums(archives))
+    if before:
+        log(f"  远端已有 {before} 个 zip，合并进 {SUMS_NAME}")
+    write_sums(staging, merged)
 
     log(f"[上传] {repo_id} ← {staging}")
     api.upload_folder(
@@ -301,7 +339,7 @@ def main(argv: list[str] | None = None) -> int:
             log(f"  复用 {archive.name}（{archive.stat().st_size / 2**20:.1f} MB）")
         archives.append(archive)
 
-    write_sums(staging, archives)
+    write_sums(staging, local_sums(archives))
 
     commit_message = args.commit_message or (
         "上传 " + ", ".join(archive.stem for archive in archives)
@@ -313,10 +351,14 @@ def main(argv: list[str] | None = None) -> int:
         log(f"[演练] 将上传：{', '.join(p.name for p in sorted(staging.iterdir()) if p.is_file())}")
         return 0
 
-    token = args.token or None
+    token = args.token or os.environ.get("MODELSCOPE_API_TOKEN") or ""
     if not token:
-        warn("没有 --token 也没有 MODELSCOPE_API_TOKEN，尝试用本机已缓存的登录态")
-    do_upload(staging, args.repo_id, token, commit_message)
+        error(
+            "没有访问令牌。用 --token 或 export MODELSCOPE_API_TOKEN=... 提供，"
+            "在 https://modelscope.cn/my/myaccesstoken 获取（别写进仓库）。"
+        )
+        return 2
+    do_upload(staging, args.repo_id, token.strip(), commit_message, archives)
     log(f"上传内容：{', '.join(archive.name for archive in archives)} + {SUMS_NAME}")
     if blocked:
         log(f"未上传（有阻塞）：{', '.join(blocked)}")
