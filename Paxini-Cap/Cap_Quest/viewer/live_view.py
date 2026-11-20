@@ -10,10 +10,10 @@ Three viewers exist in this project, on purpose:
 - ``HtmlLiveView`` (also here) shows the same numbers and camera previews as a
   page on ``http://127.0.0.1:8765/``, served from a forked child.
 
-``--view-mode auto`` picks between the last two: WSL keeps its WSLg display
-(a weston compositor with no window manager, where a Tk window can land
-off-screen and cannot be raised from the taskbar), so WSL gets the page;
-native Linux gets the window.  ``html`` / ``tk`` force either one.
+``--view-mode auto`` picks between the last two: a reachable X / Wayland
+display gets the Tk window; with no display session (SSH, plain tty, a
+compositor without a window manager) the Tk window lands off-screen or fails to
+open, so the browser page is used instead.  ``html`` / ``tk`` force either one.
 
 Both show **numbers only**: four magnetic-encoder joint angles on the left, the
 10-slot resultant-force table on the right, camera thumbnails below.  During a
@@ -79,19 +79,18 @@ _SENTINEL = None
 _QUEUE_FRAMES = 240
 
 
-def running_under_wslg() -> bool:
-    """True when the display is WSLg rather than a real X/Wayland session.
+def has_display_session() -> bool:
+    """True when an X / Wayland display is reachable.
 
-    WSLg 用的是 weston 的精简合成器，没有用户熟悉的窗口管理器：窗口位置由它
-    自己决定（常在屏幕右下、比屏幕还高），被盖住后任务栏那条带
-    ``[WARN:COPY MODE]`` 前缀的条目也拉不回来。原生 Linux 有正常 WM，没有这个问题。
+    没有显示会话时（SSH、纯 tty、容器里没有合成器），Tk 窗口要么开不出来，要么被
+    摆到屏幕外且拉不回来；浏览器版不受影响，所以 ``auto`` 在这种情况下选 html。
     """
-    return bool(os.environ.get("WSL_DISTRO_NAME")) or Path("/mnt/wslg").is_dir()
+    return bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
 
 
 def default_view_mode() -> str:
-    """``auto`` 的落点：WSL 用浏览器版，原生 Linux 用窗口版。"""
-    return "html" if running_under_wslg() else "tk"
+    """``auto`` 的落点：有显示会话用窗口版，否则用浏览器版。"""
+    return "tk" if has_display_session() else "html"
 
 
 # --------------------------------------------------------------------------
@@ -247,12 +246,11 @@ class _Viewer:
         self.fig.canvas.mpl_connect("close_event", self._on_close)
         self.fig.canvas.mpl_connect("key_press_event", self._on_key)
         self.fig.show()
-        # WSLg 里窗口经常开在别的窗口后面，看起来像"没打开"。置顶并抬一次，
-        # 这样一开采集就能看见；关不掉也不影响录制（关闭只关视图）。
-        # WSLg 里窗口默认会开在屏幕右下角，897 px 的高度把下半截（相机缩略图）
-        # 直接推出屏幕，看起来就像"视图没打开"。这里显式给一个能放进屏幕的
-        # 尺寸与位置；不要动 -topmost / withdraw，那会让窗口在无窗口管理器的
-        # WSLg 里根本不映射。
+        # 没有窗口管理器时，窗口经常开在别的窗口后面，看起来像"没打开"；置顶并
+        # 抬一次，这样一开采集就能看见。关不掉也不影响录制（关闭只关视图）。
+        # 同一环境下窗口还可能开在屏幕外（默认位置在右下角，897 px 的高度会把
+        # 下半截相机缩略图推出屏幕），所以这里显式给一个能放进屏幕的尺寸与位置；
+        # 不要动 -topmost / withdraw，那会让窗口在无 WM 的合成器里根本不映射。
         try:
             window = self.fig.canvas.manager.window
             screen_w = int(window.winfo_screenwidth())
@@ -775,9 +773,9 @@ def _html_viewer_main(
 class HtmlLiveView:
     """Serve the same readout as a web page on 127.0.0.1.
 
-    The Tk window is nicer to glance at, but WSLg has no window manager: the
-    window can land partly off-screen, and once it is behind something the
-    taskbar entry often cannot bring it back.  This viewer has no such
+    The Tk window is nicer to glance at, but a compositor without a window
+    manager can place it partly off-screen, and once it is behind something
+    there is no taskbar entry to bring it back.  This viewer has no such
     problem — it is just a page in the browser the user already has open,
     with the camera previews streamed as MJPEG.
 

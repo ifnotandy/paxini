@@ -64,7 +64,7 @@ data.h5
 > 三个来源的时钟域、换算方式、坑，统一整理在 [`时间戳说明.md`](时间戳说明.md)。
 > 本节只回答"哪些字段是时间戳、谁打的"。
 
-手套用 pxhandsdk 帧结构里的两个读数，Quest 用 xrobotoolkit SDK 的四个读数，相机用 V4L2/ffmpeg 的 pts（`wsl` 后端的 `epoch_unix_ns` 平移已随该后端于 2026-11-20 删除，见 `ARCHIVED.md`）。
+手套用 pxhandsdk 帧结构里的两个读数，Quest 用 xrobotoolkit SDK 的四个读数，相机用 V4L2/ffmpeg 打的主机墙钟。
 
 ![手套帧的时间戳来自 SDK](figures/timestamp-frame.svg)
 
@@ -202,12 +202,12 @@ Recordings/data_20261111_1/          # 在 Paxini-Cap 根下，不在 Cap_Quest 
 
 | 数据集 | 形状 | 类型 | 含义 |
 |---|---|---|---|
-| `timestamp_unix_ns` | (M,) | int64 | 该路全部视频帧的绝对墙钟，严格递增。`linux` 后端直接是 pts；`wsl` 后端曾用 `epoch_unix_ns + pts`（已删） |
-| `timestamp_monotonic_ns` | (M,) | int64 | **仅已删除的 `wsl` 后端**。main 上不创建此数据集。原文：同一批帧在单调钟上的绝对时刻（`epoch_monotonic_ns + pts`），与 `cap/timestamp_monotonic_ns` 同域，免疫 NTP 跳变。`linux` 后端不创建此数据集 |
+| `timestamp_unix_ns` | (M,) | int64 | 该路全部视频帧的绝对墙钟，严格递增。就是 ffmpeg 写进容器的 pts |
+| `timestamp_monotonic_ns` | (M,) | int64 | **当前不创建。** 2026-11-17 及更早的文件里可能有这一列（当时相机走另一条采集路径），读的时候用 `"timestamp_monotonic_ns" in group` 判断 |
 
-就这两列（`linux` 后端只有第一列）。**没有 `frame_index`、没有 `skew_ns`**——配对在采集端已经全部移除。
+现在只写第一列。**没有 `frame_index`、没有 `skew_ns`**——配对在采集端已经全部移除。
 
-这一列的来源是主机侧（Linux 的 V4L2 驱动 / ffmpeg，或 Windows 的 DirectShow），
+这一列的来源是主机侧（V4L2 驱动 / ffmpeg），
 **不是某个 SDK**：它没法由 SDK 提供，删了视频就没有任何时间轴可用。这是"只记 SDK
 时间戳"规则唯一的例外，写在这里以免误解。
 
@@ -221,30 +221,6 @@ V4L2 驱动在每次出帧的 `v4l2_buffer.flags` 里声明时钟类型（`TIMES
 
 现在只有一种做法：ffmpeg 用 `-use_wallclock_as_timestamps 1` 给每帧打主机墙钟，
 并校验首帧 pts 必须是墙钟量级（≤ 1.5e9 直接报错），不做推断、不留选项。
-
-### 5.2 `wsl` 后端：两个 epoch + 相对 pts
-
-WSL 里相机必须走 Windows 的 `ffmpeg.exe`（usbipd 转发 UVC 会丢等时包，720p 掉到
-5 fps）。DirectShow 不接受 `-use_wallclock_as_timestamps`，加了直接
-`Could not RenderStream`，所以 pts 只能从 0 起。
-
-补法（同时补两个钟）：
-
-- ffmpeg 启动前记 `start_unix_ns` 与 `start_monotonic_ns`
-- 轮询输出文件，首个字节落盘时**同时**记 `epoch_unix_ns` 和 `epoch_monotonic_ns`
-- 停止后读 pts：
-  - `timestamp_unix_ns[i] = epoch_unix_ns + pts[i]`
-  - `timestamp_monotonic_ns[i] = epoch_monotonic_ns + pts[i]`
-
-两个 epoch 都写进 `manifest.json` 的 `cameras.per_camera.<id>`。精度取决于"首字节
-落盘"与"首帧曝光"之差：实测 ffmpeg 启动到首字节 1550 ± 10 ms（冷启动 1427 ms），
-两路之间相差 9 ms。
-
-为什么要两个：墙钟能给绝对时刻，但会被 NTP step；单调钟跟 `cap/timestamp_monotonic_ns`
-同域，可以免疫跳变做帧间对齐。下游按需选一个。
-
-**不要用 Windows 的系统时间去换算**：WSL 与 Windows 实测差约 1.61 秒，混用会整体偏移。
-两个 epoch 都取 WSL 自己的 `time.time_ns()` / `time.monotonic_ns()`。
 
 ---
 
@@ -357,7 +333,7 @@ cameras/right_cam0      row 0
 
 | 版本 | 变化 |
 |---|---|
-| **4**（当前） | `cameras/<id>/` 新增 `timestamp_monotonic_ns`（仅 `wsl` 后端）：把 DirectShow 的相对 pts 用 `epoch_monotonic_ns` 平移到主机单调钟，与 `cap/timestamp_monotonic_ns` 同域，免疫 NTP 跳变。`linux` 后端不创建此数据集。`meta.cameras.per_camera.<id>` 增加 `epoch_monotonic_ns` 与 `monotonic_available` |
+| **4**（当前） | `cameras/<id>/` 曾新增可选的 `timestamp_monotonic_ns`（与 `cap/timestamp_monotonic_ns` 同域的单调钟列）；现在的采集端不再写它，但 2026-11-17 及更早的文件里可能存在。`meta.cameras.per_camera.<id>` 同步多了 `monotonic_available` |
 | 3 | 时间戳只保留 SDK 给的：`cap/` 删掉 `received_monotonic_ns`；`quest/` 的三列主机时间戳（`host_poll_start_ns`/`host_poll_end_ns`/`host_timestamp_ns`）换成四列 SDK 时间戳（`sdk_`/`body_`/`motion_`/`body_joints_timestamp_ns`） |
 | 2 | 删除采集端全部对齐：`cameras/*/frame_index`、`cameras/*/skew_ns`、`quest/available`、`quest/skew_ns`；`quest/` 改成自己的行轴 `Q` |
 | 1（废弃） | 采集时就做最近邻配对，`quest` 与 `cap` 同为 N 行 |

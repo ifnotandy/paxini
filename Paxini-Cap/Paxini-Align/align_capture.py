@@ -414,7 +414,7 @@ def cast_to(values: np.ndarray, dtype: np.dtype) -> np.ndarray:
 def open_recording(recording: Path, clear_flag: bool = False) -> Any:
     """Open data.h5 read-only, repairing the crashed-write consistency flag if asked."""
     if h5py is None:
-        raise AlignError("缺少 h5py：请用装了 h5py 的 Python 运行（本机用 Python312 或 WSL 的 python3.10）")
+        raise AlignError("缺少 h5py：请用装了 h5py 的 Python 运行（本机用 Python312）")
     path = recording / "data.h5"
     try:
         return h5py.File(path, "r")
@@ -1066,7 +1066,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output", default=None, help="输出目录，默认 <采集目录>/aligned")
     parser.add_argument("--reference", default=None, help="作为采样网格的相机槽位，默认第一个（通常是 cam0）")
     parser.add_argument("--timebase", choices=("auto", "mono", "unix"), default="auto",
-                        help="auto 优先单调钟；linux 后端没有单调钟时自动退回墙钟")
+                        help="auto 优先单调钟；文件里没有 timestamp_monotonic_ns（旧文件）时自动退回墙钟")
     parser.add_argument("--delay-ms", type=float, default=None,
                         help=f"相机延迟补偿（毫秒），默认读台账，读不到用 {DEFAULT_DELAY_MS}")
     parser.add_argument("--no-delay", action="store_true", help="不减延迟（调试用，正式数据别用）")

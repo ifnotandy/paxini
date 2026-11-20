@@ -21,12 +21,13 @@
 
 ## 已知限制
 
-**这批数据是 WSL 采集路径下产生的。** `main` 已于 2026-11-20 删除 WSL 支持，只剩原生
-Ubuntu（V4L2）；WSL 版本冻结在 `archive/wsl-backend` 分支。因此：
+**这批数据是 2026-11-17 在旧采集路径（相机经 Windows）下产生的**，当前 `main` 只有原生
+Ubuntu（V4L2）一条路。读这批数据时注意：
 
 - 相机 ID 是 `right_cam0` / `right_cam1`（当时前缀跟手别走），当前代码写 `<cap_side>_camN`；
-- 对齐用的 Δ 是 WSL 路径实测的 **192.3 ms**（`Cap_Quest/latency/records/archive/andy-win.yaml`
-  第 3 条，1280×720@30 `copy`）。换原生 V4L2 必须重测，不能沿用；
+- 对齐这批数据要用的 Δ 是当时实测的 **192.3 ms**（1280×720@30 `copy`；原始台账在
+  `archive/wsl-backend` 分支的 `Cap_Quest/latency/records/andy-win.yaml`）。**当前路径必须
+  重测，不能沿用这个数**；
 - 三份样例的 `data.h5` 里有 `quest/` 组，但 C8 时钟域从未验证，`--quest-align sdk_unix`
   会被门控拒绝。这是预期行为，不是数据损坏。
 

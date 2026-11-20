@@ -22,7 +22,7 @@ Paxini-Cap/
 ├── DOC/                # 文档（格式说明、时钟说明、待验证清单、标定）
 │   ├── README.md           # 文档索引 + 阅读顺序 + 维护约定
 │   ├── HDF5结构说明.md     # 逐字段说明 + 完整目录树（data.h5 的唯一权威文档）
-│   ├── 时间戳说明.md       # 三个来源的时钟域、换算公式、四个坑（先读这份）
+│   ├── 时间戳说明.md       # 三个来源的时钟域、换算公式、三个坑（先读这份）
 │   ├── 待验证清单.md       # 真机/Quest 待验证项 + 已决定不做的理由 + 标定（G 组）
 │   ├── 标定.md             # 两类标定：手套零点（已实现）+ 相机标定（未实现）
 │   └── figures/            # 时间戳图解（SVG，供 HDF5结构说明 / 时间戳说明 引用）
@@ -32,7 +32,6 @@ Paxini-Cap/
 │   └── camera.py           # 单路相机录 N 秒，ffprobe 回读；复用 camera_ffmpeg.py
 ├── sdk/                # deb 包 + SHA256SUMS + 安装说明（二进制不入库）
 │   ├── xrobotoolkit/       # Quest 端 APK
-│   └── ffmpeg-win/         # 历史遗留：WSL 路径用的 Windows ffmpeg.exe（main 不再用）
 ├── requirements.txt
 └── README.md
 ```
@@ -81,7 +80,7 @@ Paxini-Cap/
    `HDF5结构说明.md` 的版本变更表里写清改了什么。下游按版本号判断怎么读。
 8. **相机只有 V4L2 一条路。** 不要把相机经 USB/IP 转发给虚拟机或容器：UVC 的等时包
    会被丢，720p 从 30 fps 掉到 5 fps；同理也不能让两路 720p30 挤在同一个 Hub 上。
-   想在 Windows 上采集只能回 `archive/wsl-backend` 分支，不要往 main 上加回现场。
+   要在 Windows 上采集只能回 `archive/wsl-backend` 分支，不要往 main 上加回现场。
 
 ### 0.2 代码地图
 
@@ -127,7 +126,7 @@ python3.10 selftest/selftest.py          # 应为全过
 
 | 项 | 要求 |
 |---|---|
-| 系统 | Ubuntu 22.04 / 24.04（原生安装，不用 WSL） |
+| 系统 | Ubuntu 22.04 / 24.04（原生安装） |
 | Python | **`python3.10`**。系统 `python3` 是 3.12，此时 `import pxhandsdk` 能过但 `hasattr(pxhandsdk,"PxCap3")` 为 False |
 | 手套 SDK | `pxhandsdk 1.0.0.0`，`dpkg -i` 装到 `/usr/lib/python3/pxhandsdk` |
 | Python 包 | `numpy` / `h5py` / `xrobotoolkit-sdk`，用 `python3.10 -m pip install --user` |
@@ -189,8 +188,8 @@ PC Service、Quest Wi-Fi、APK 的 Tracking/Send 开关和手柄唤醒状态。
 ## 2. 硬件接入
 
 **所有设备都直接接在 Ubuntu 主机上**：两路相机走 UVC（`/dev/video*`），手套走 USB CDC
-串口（`/dev/ttyACM*`）。2026-11-20 删除了 WSL 路径——那条路把相机留在 Windows、由 WSL
-调 `ffmpeg.exe`，只存在于 `archive/wsl-backend` 分支，见仓库根 `ARCHIVED.md`。
+串口（`/dev/ttyACM*`）。这是唯一一条采集路径；2026-11-20 之前的 Windows 采集实现冻结在
+`archive/wsl-backend` 分支，只在必须回到那套硬件时才 checkout。
 
 - 手套按 **USB VID:PID `28e9:018a`** 识别，不依赖 `/dev/ttyACM0` 编号（重插会变）。
   程序同时扫 `ttyACM*`、`ttyUSB*` 和 `/dev/serial/by-id`。

@@ -101,7 +101,7 @@ dpkg-deb --build --root-owner-group "$WORK" pxhandsdk_1.0.0.0.ubantu2204_amd64.p
 |---|---|---|
 | `runService.sh` | 只后台启动 `RoboticsServiceProcess` | **用这个** |
 | `run2D.sh` | 服务 + 2D 演示程序 | 不用 |
-| `run3D.sh` | 服务 + Unity 三维演示（桌面菜单入口） | 不用，WSL 无显示会报错 |
+| `run3D.sh` | 服务 + Unity 三维演示（桌面菜单入口） | 不用，无显示环境会报错 |
 | `runRobotDataRecorder.sh` | 服务 + 录制演示 | 不用 |
 
 ```bash
@@ -130,35 +130,3 @@ dpkg -L pxhandsdk | grep -E 'pxcap3|PxCap3SDK'
 
 第一条必须打印出类对象。系统默认 `python3`（3.12）会 `import` 成功但拿不到
 `PxCap3`——那是 Python 版本不匹配，不是安装失败。
-
-## 5. Windows 版 ffmpeg（**已归档，main 不需要**）
-
-> 2026-11-20 起 `main` 只用原生 V4L2，本节仅对 `archive/wsl-backend` 分支有效。
-> 当时的做法是 WSL 调 Windows 的 `ffmpeg.exe` 走 DirectShow：usbipd 转发 UVC 会丢
-等时包，720p 从 30 fps 掉到 5 fps。原生 Linux 不需要这一节。
-
-放这里即可，代码默认读这个路径：
-
-```text
-Paxini-Cap/sdk/ffmpeg-win/ffmpeg.exe
-```
-
-`*.exe` 已被 `.gitignore` 排除，换机器要自己放一份。来源二选一：
-
-- 从 gyan.dev / BtbN 下载 Windows 静态版，解出 `ffmpeg.exe`
-  （实测可用：`ffmpeg 9.0.2-essentials_build`，约 100 MB）
-- 装过 `imageio-ffmpeg` 的 Python 环境里直接拷：
-  `<Python>/Lib/site-packages/imageio_ffmpeg/binaries/ffmpeg-win-x86_64-*.exe`
-
-只需要 `ffmpeg.exe`，不需要 `ffprobe.exe`：回填 pts 用的是 Linux 侧 ffprobe，
-mkv 在 `/mnt/c` 下两边都能读。
-
-确认能用：
-
-```bash
-Paxini-Cap/sdk/ffmpeg-win/ffmpeg.exe -hide_banner -version | head -1
-Paxini-Cap/sdk/ffmpeg-win/ffmpeg.exe -hide_banner -f dshow -list_devices true -i dummy
-```
-
-第二条会列出 DirectShow 视频设备。相机重名时以 `Alternative name` 为准，
-采集程序用的就是它。

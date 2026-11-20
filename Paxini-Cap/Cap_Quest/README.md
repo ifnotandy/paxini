@@ -374,15 +374,15 @@ python3.10 capture/collect_cap.py --cap-side right --view --view-mode html   # �
 python3.10 capture/collect_cap.py --cap-side right --view --view-mode tk     # 强制 matplotlib 窗口
 ```
 
-**`--view-mode auto`（默认）按平台落点：**
+**`--view-mode auto`（默认）按显示会话落点：**
 
 | 环境 | 落点 | 原因 |
 |---|---|---|
 | 有图形会话（X11 / Wayland） | `tk` | 有正常 WM，窗口该多大就多大、任务栏能点击还原，窗口版更省事，不用切浏览器 |
-| 无显示会话（SSH、纯 tty、WSLg 这类无 WM 的合成器） | `html` | 没有窗口管理器时 Tk 窗口会被摆到屏幕外或压在别的东西后面，浏览器版不受影响 |
+| 无显示会话（SSH、纯 tty、没有合成器的容器） | `html` | 没有窗口管理器时 Tk 窗口会被摆到屏幕外或压在别的东西后面，浏览器版不受影响 |
 
 判断方式是 `DISPLAY` / `WAYLAND_DISPLAY` 是否存在（无显示会话时退回 `html`，判定见
-`live_view.running_under_wslg()`）。两种模式的内容完全一样，只是壳不同。
+`live_view.has_display_session()`）。两种模式的内容完全一样，只是壳不同。
 
 **`html` 模式**：启动时打印 `http://127.0.0.1:8765/`（端口被占自动顺延），页面每 150 ms
 拉一次 `/state`，两路相机走 MJPEG（`/cam/<id>`），`age_s` 超过 2 s 会显示"数据停了"。
@@ -531,13 +531,8 @@ ffmpeg/ffprobe 从 `PATH` 找，也认环境变量 `FFMPEG`。不使用统一系
 一条路径：ffmpeg 直接读 `/dev/videoN`，加 `-use_wallclock_as_timestamps 1`，容器里的
 pts 本身就是墙钟纳秒，不需要事后锚定。设备写 `/dev/video0`，停止用 SIGINT。
 
-> 2026-11-20 删除了 WSL / DirectShow 路径。那条路要相机留在 Windows、由 WSL 调
-> `ffmpeg.exe` 走 `-f dshow`；usbipd 转发 UVC 会丢等时包，720p 从 30 fps 掉到 5 fps。
-> 需要它时 checkout `archive/wsl-backend` 分支，恢复步骤见仓库根的 `ARCHIVED.md`。
-
-**延迟 Δ 必须在本条路径上重测。** WSL 时代测出的 192.3 ms 里含 DirectShow 缓冲；
-V4L2 的 pts 就是墙钟，Δ 通常只有几十毫秒。两个数不可互换 —— 拿错了时间轴会整体平移
-一百多毫秒，而行数、间隔、单调性全都正常，看不出错。
+**延迟 Δ 必须在本机、本参数下实测。** 任何旧的、别人机器上的数值都不能沿用 —— 拿错了
+时间轴会整体平移一百多毫秒，而行数、间隔、单调性全都正常，看不出错。
 
 测法：
 
@@ -584,7 +579,6 @@ median = entry["median_ms"]
   给出与上一条同参数记录的差值，超过 20 ms 会当场提醒。
 - 每个 `latency_measure/<时间戳>_*/` 目录仍是本次的完整产物（逐帧 CSV、直方图、
   录制的 mkv），台账里 `output_dir` 指回去；这些产物不入库，`output_dir` 只在本机有效。
-- `latency/records/archive/andy-win.yaml` 是 WSL 路径的历史台账，**只作证据，不要取数**。
 
 ## 7. 常见问题
 
@@ -645,10 +639,10 @@ ls -l /dev/serial/by-id/ /dev/ttyACM* /dev/ttyUSB* 2>/dev/null
 | 项 | 结果 |
 |---|---|
 | `py_compile` / `pyflakes` | 全过，0 告警 |
-| `selftest.py` | **全过**（2026-11-20 删除 WSL 用例后项数会变，以运行输出为准）（在原有覆盖之外增加 C8 时钟探针、sdk_unix 报告与当前文件质量门控、Quest 独立时间轴/sequence 降级和失败工件） |
+| `selftest.py` | **全过**（项数以运行输出为准）（在原有覆盖之外增加 C8 时钟探针、sdk_unix 报告与当前文件质量门控、Quest 独立时间轴/sequence 降级和失败工件） |
 | `--list-devices` | 正常输出串口 / V4L2 节点 / ffmpeg |
 | 无设备时报错 | 退出码 **2**，保留 `startup_failure.json`，不创建 `data.h5` |
-| 相机延迟测量 | **原生 V4L2 路径尚未实测**；WSL 时代的 189.71 / 287.22 / 192.30 ms 已归档到 `latency/records/archive/andy-win.yaml`，不能沿用 |
+| 相机延迟测量 | **两路都尚未实测**；任何旧路径的数都已经作废，不能沿用 |
 | 假 SDK 驱动真实主循环（python3.10，5 秒） | 602 行、**120.0 Hz**、`verify` 为空、`alignment: none` |
 | 回调耗时（60 秒合成帧） | 均值 0.21 ms、最大 0.62 ms |
 | 文件体积（合成数据） | 3.6 KB/行 ≈ 1.57 GB/小时（120 Hz，444 点全量） |
@@ -666,9 +660,8 @@ ls -l /dev/serial/by-id/ /dev/ttyACM* /dev/ttyUSB* 2>/dev/null
   模型只吃图像、不算位姿，四组量（内参/双相机外参/手套→相机/Quest→相机）都没有使用场景，
   见 [`../DOC/待验证清单.md`](../DOC/待验证清单.md) E8。代价是指尖三维位置、深度、
   跨源空间对齐都不成立，汇报里不许写。
-- **相机延迟 Δ 在原生 Ubuntu 上尚未实测**：`measure_camera_latency.py` 只过了编译、
-  `--list` 与合成视频验证（设定 42.7 ms 还原 42.7 ms）。WSL 时代那三次实测来自
-  DirectShow 路径，已归档，不能当 V4L2 的值用。
+- **相机延迟 Δ 尚未实测**：`measure_camera_latency.py` 只过了编译、`--list` 与合成
+  视频验证（设定 42.7 ms 还原 42.7 ms）。旧采集路径的数值已作废，不能拿来用。
 - **手套零点标定的写操作没有真机记录**：`hand_calib.py` 写完但只在离线下验证（`selftest`
   7 项）。真机只跑过只读的 `info`（2026-11-16 21:02，SN `DCG04R48500093`）：4 路编码器
   0.011 / 0.253 / 0.137 / 0.352°，10 路合力最大 0.2 N，故障 0 项——**零点本身是准的**。

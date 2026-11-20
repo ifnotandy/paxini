@@ -33,38 +33,6 @@
 
 ## 二、环境
 
-> **2026-11-20**：`main` 已删除 WSL 路径，本节里 usbipd / DirectShow 相关的条目
-> 只对 `archive/wsl-backend` 分支有效，保留是为了那天真要回去时别再踩一遍。
-
-### `usbipd attach` 报 `already attached to a client`，WSL 里却没有 `/dev/ttyACM*`
-
-**现象**：`usbipd list` 手套那行是 `Attached`，`ls /dev/ttyACM*` 为空；再 `attach`
-被直接拒绝：
-
-```text
-usbipd: info: Device with hardware-id '28e9:018a' found at busid '3-3'.
-usbipd: error: Device with busid '3-3' is already attached to a client.
-```
-
-**根因**：WSL 空闲约 60 s 会自动关机（`vmIdleTimeout` 默认值），USB/IP 会话随之
-断开，但 usbipd 的状态列不跟着更新。设备侧还记着那个已经死掉的客户端，于是
-attach 被当成重复操作拒掉。
-
-**对策**：
-
-```powershell
-usbipd detach --busid <BUSID>
-usbipd attach --wsl --busid <BUSID>
-```
-
-`detach` 会让设备重新枚举，紧跟的 `attach` 常报 `There is no device with busid`，
-等 1~2 秒重试同一条命令，别改参数。仍然拒绝就 `wsl --shutdown` 关掉全部实例再挂
-——注意它会杀掉 WSL 里所有正在跑的任务。
-
-**判据**：只看 `/dev/ttyACM*` 在不在。`usbipd list` 的 `Attached` 不能当证据。
-`scripts/run_capture_noquest.sh` 已内置这套 detach→attach 重试（最多 5 轮），
-手工跑就得自己来。
-
 ### `cv2.namedWindow` 报 "The function is not implemented"
 
 **根因**：装的是 `opencv-python-headless`。它和 `opencv-python` 装在同一环境时，
@@ -79,14 +47,6 @@ python -m pip install --force-reinstall --no-deps opencv-python
 
 装完 `GUI:` 应显示 `WIN32UI`（Windows）或 `QT5`（Linux）。
 
-### DirectShow 报 `-5` / `E_ACCESSDENIED`，第二轮启动失败
-
-**根因**：DirectShow 相机是独占的。上一轮 `ffmpeg.exe` 退出后驱动还要一点时间才
-真正释放。
-
-**对策**：两轮之间等 2~3 秒。`latency/measure_camera_latency.py` 的 `--repeat`
-已内置等待与重试。
-
 ### `import pxhandsdk` 成功，但 `PxCap3` 不存在
 
 **根因**：用成 `python3`（3.12）了。3.12 能导入包，但拿不到 C 扩展的类。
@@ -100,20 +60,9 @@ python -m pip install --force-reinstall --no-deps opencv-python
 
 **对策**：不用 venv，直接 `python3.10 -m pip install --user`。
 
-### Git Bash 把 `/mnt/c/...` 改写成 `G:/WorkBuddy/...`
-
-**根因**：MSYS 的路径自动转换。调 WSL 时尤其容易中招，报"文件不存在"但路径看着对。
-
-**对策**：命令前加 `MSYS_NO_PATHCONV=1`，或用 `//mnt/c/...` 双斜杠。
-
 ### `sudo` 要密码，但脚本里没法交互
 
-**对策**：`wsl.exe` 里用 `echo <pw> | sudo -S <cmd>`。
-
-### WSL 的 `/tmp` 和 Windows 的临时目录不是一回事
-
-**对策**：跨端传文件走 `/mnt/c/...`。WSL 侧生成的文件要让 Windows 程序读，就写到
-`/mnt/c/` 下。
+**对策**：`echo <pw> | sudo -S <cmd>`，或者先配免密。
 
 ### 中文在 Windows 控制台显示成乱码或问号
 
@@ -147,31 +96,22 @@ codec、USB 口、机器都要重测。
 
 ### 用了几个月前的 Δ，时间轴整体偏 100 ms
 
-**根因**：同一台机器、同一套参数，读数也会整体跳一档。2026-11-16 连测三次：
-189.7 → 287.2 → 192.3 ms，三次 IQR 都只有 5~6 ms。变的不是抖动，是 DirectShow
-缓冲深度（那一次多了约 3 帧）。把某一次的读数当常量写死，隔几个月就对不上。
+**根因**：同一台机器、同一套参数，读数也会整体跳一档。连测三次能出现
+189.7 → 287.2 → 192.3 ms 这种差异，而三次 IQR 都只有 5~6 ms。变的不是抖动，是
+驱动缓冲深度（那一次多了约 3 帧）。把某一次的读数当常量写死，隔几个月就对不上。
 
 **识别**：和「偏几百毫秒」一样 —— 行数、间隔、单调性全正常，只有对齐错。
 
 **对策**：下游现场读 `latency/records/<机器>.yaml` 取最近一次 `ok: true`；记录里的
 `delta_prev_ms` 超过 20 ms 说明链路变过，别直接拿去修时间轴，先重测确认。
 
-### 原生 Ubuntu 采的数据减了 WSL 测的 Δ，时间轴整体平移
+### 两台机器的时钟相减，结果每次都不一样
 
-**根因**：两条路径的 pts 基准不同。V4L2 的 pts 是绝对墙钟；DirectShow 的 pts 被
-ffmpeg 归零到首帧，再靠 `epoch` 平移成绝对时间。Δ 也不是同一个量：原生 Ubuntu 通常
-几十毫秒，WSL 约 190 ms，多的是虚拟机边界与 DirectShow 缓冲。
+**根因**：两台机器的墙钟差**不是常数**。同一对机器，历史记录差 1610 ms，另一次只有
+0.3 ms，取决于两边 NTP 同步到什么程度。
 
-**识别**：拿错数只会让时间轴整体平移，行数、间隔、单调性全都正常，看不出异常。
-
-**对策**：两条路径各测各的，别抄。判据是量级：差三到五倍就说明拿错了。
-
-### 跨系统时钟相减，结果每次都不一样
-
-**根因**：WSL 与 Windows 的墙钟差**不是常数**。历史记录 1610 ms，2026-11-16 实测
-0.3 ms，取决于 NTP 同步状态。
-
-**对策**：一个差值里的两个时刻必须在同一侧取。看到任何 `t_a - t_b`，确认两边同源。
+**对策**：一个差值里的两个时刻必须在同一侧取。看到任何 `t_a - t_b`，先确认两边同源；
+必须跨机时，两个时刻都从同一台机器上取（比如都在主机侧），让系统差自动抵消。
 
 ### 采集中途校时，数据废了
 
@@ -213,7 +153,7 @@ write`（写标志没清），清掉标志、重算校验和之后仍然报 `tru
 **2026-11-13 那批 8 份被强杀的采集全部如此，0 份可救。**
 
 **已修**：`flush_cap()` / `flush_quest()` 末尾加 `self.file.flush()`，每批都落盘。
-实测代价 **0.07 ms / 100 行批**（占这批写入 10 ms 的 0.8%）。WSL 真实环境强杀对照：
+实测代价 **0.07 ms / 100 行批**（占这批写入 10 ms 的 0.8%）。真实环境（采集中途）强杀对照：
 
 | 版本 | 强杀后文件 | 清标志后 |
 |---|---|---|

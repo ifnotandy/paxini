@@ -1,13 +1,8 @@
 #!/usr/bin/env python3.10
 """measure_camera_latency.py —— 测量相机采集链路的延迟（原生 Ubuntu / V4L2）
 
-项目有两条采集路径，区别只在相机这一路怎么接：
-
-- **原生 Ubuntu**：ffmpeg 直读 ``/dev/videoN``（V4L2），本文件就是这条
-- **WSL**：Python 仍跑在 Linux 里，相机借 Windows 的 ``ffmpeg.exe`` 走
-  DirectShow，用 `archive/wsl-backend` 分支里的 ``measure_camera_latency_wsl.py`` 测
-
-两者的 Δ 不可互换，各测各的。
+相机由 ffmpeg 直读 ``/dev/videoN``（V4L2），Δ 与设备、分辨率、帧率、codec、USB
+口都有关，换任何一种都要重测。
 
 问题
 ----
@@ -25,12 +20,7 @@
 
     timestamp_unix_ns[i] = pts[i]
 
-（2026-11-20 之前还有一条 WSL/DirectShow 路径，pts 从 0 起、靠 ``epoch_unix_ns``
-平移；那条路径已删除，需要时看 ``archive/wsl-backend`` 分支的同一份脚本。）
-
-- 原生 Ubuntu 的 Δ 通常几十毫秒，WSL 约 190 ms
-- 单轮就够；WSL 那边轮间会差 20 ms 左右，要 ``--repeat`` 合并
-- 两条路径的 Δ **绝对不可互换**，基准不同，各测各的
+Δ 通常几十毫秒。单轮就够；需要更稳的数时用 ``--repeat`` 合并多轮。
 
 做法
 ----
@@ -567,8 +557,6 @@ def write_outputs(
             "codec": meta.get("codec"),
             "frames": result.frames,
             "actual_fps": round(result.fps, 3),
-            # pts 本身即墙钟，没有独立锚点；保留该键是为了和历史 JSON 字段对齐。
-            "epoch_unix_ns": None,
             "first_frame_unix_ns": result.first_ts_ns,
             "recorded_s": round(result.elapsed_s, 3),
         },
@@ -886,7 +874,7 @@ def main(argv: list[str] | None = None) -> int:
     devices = resolve_devices()
 
     if args.list:
-        print("后端      linux（V4L2 + -use_wallclock_as_timestamps 1）")
+        print("采集路径  V4L2（-use_wallclock_as_timestamps 1）")
         print(f"ffmpeg    {ffmpeg_exe}  ({ffmpeg_version(ffmpeg_exe)})")
         print(f"采集参数  {width}x{height}@{fps:g}  codec={codec}")
         print("相机：")
@@ -903,7 +891,7 @@ def main(argv: list[str] | None = None) -> int:
     if not devices:
         warn(
             "没有枚举到任何相机。检查：① 相机是否插上（ls /dev/video*）"
-            "② 当前用户是否在 video 组（id -nG）③ 是否装的是纯 WSL 环境"
+            "② 当前用户是否在 video 组（id -nG）③ 虚拟机/容器里是否把 USB 直通了"
         )
         return 2
 

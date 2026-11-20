@@ -9,8 +9,8 @@ rendered in a separate panel with its own SDK time axis.
 Two output modes, same data model:
 
 - default — matplotlib/Tk window.  Space plays, arrows step, clicking a trace
-  jumps, the slider scrubs.  Needs ``python3.10-tk`` and a display; WSLg
-  provides one, so ``DISPLAY=:0`` is enough.
+  jumps, the slider scrubs.  Needs ``python3.10-tk`` and a reachable display
+  (``DISPLAY`` or ``WAYLAND_DISPLAY``).
 - ``--html [PATH]`` — one self-contained HTML file with the data embedded.
   No toolkit, no server, no CDN: hand it to anyone and double-click.
 

@@ -153,6 +153,5 @@ Timing policy (identical to ``Dex_Quest/collect_hand_pose.py``):
   `usable = min(count, len(points), 119)` 回写），444 合计由 `selftest` 锁住。
 - `verify_rows` 只查 `cap/` 与 `quest/`，`cameras/` 刻意排除——它的两列等长由
   `write_camera_timestamps` 自己抛 `RuntimeError` 保证。
-- WSL 后端锚不到 `epoch` 就整路失败，**没有**"假设 1.55 s"的兜底，这是刻意的。
 - `resolve_delay` 用 cam0 的台账值给两路共用，是 2026-11-17 的明确决定，
   不是漏了 cam1（cam1 缺测见 `待验证清单.md` A11）。

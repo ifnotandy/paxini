@@ -1118,9 +1118,9 @@ def test_camera_command(tmp_root: Path) -> None:
         " ".join(cmd[:6]),
     )
     check(
-        "相机命令/不含 DirectShow 参数",
-        not any("dshow" in part for part in cmd),
-        " ".join(part for part in cmd if "dshow" in part),
+        "相机命令/copyts 保留容器 pts",
+        "-copyts" in cmd and "-fps_mode" in cmd and "passthrough" in cmd,
+        " ".join(cmd[-8:]),
     )
     cam.progress_path.parent.mkdir(parents=True, exist_ok=True)
     cam.progress_path.write_text(

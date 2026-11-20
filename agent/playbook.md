@@ -35,7 +35,7 @@ python3.10 capture/collect_cap.py --cap-side right --no-quest
 | `SERIAL_BUSY(102)` | 串口被占：关掉 PXCap Studio、`hand_calib.py`、旧进程 |
 | 找不到串口 | `ls /dev/ttyACM*`；空就查线缆、供电与 `dialout` 组（改了组要重新登录） |
 | `import pxhandsdk` 成功但没 `PxCap3` | 用成 3.12 了，换 `python3.10` |
-| 相机 0 fps / 5 fps | 日志里的「相机后端」是不是被强制成 `linux` 了 |
+| 相机 0 fps / 5 fps | 先 `--list-devices` 看节点，再查分辨率/帧率是否被设备支持；5 fps 多半是带宽或 Hub 问题 |
 | 相机 20 秒不出图 | 先 `--camera-mode cam0` 排除带宽；再验分辨率是否被支持 |
 | 等 Quest 超时 120 s | 没有头显就加 `--no-quest` |
 | 采完没有 `manifest.json` | 被强杀了。数据落在最后一个满批之前（每批已 flush），先 `--clear-write-flag` 再读；2026-11-13 那批老文件没这个保护，全废 |
@@ -64,12 +64,11 @@ python3.10 capture/collect_cap.py --cap-side right --no-quest
 
 ## 5. 测相机延迟
 
-**用哪个脚本取决于你走哪条采集路径。** 两路的时间戳构成不同，测出来的数不可互换：
+只有一条采集路径，一个脚本：
 
-| 采集路径 | 脚本 | 帧时间戳的构成 | 实测量级 |
-|---|---|---|---|
-| 原生 V4L2（当前唯一路径） | `latency/measure_camera_latency.py` | pts 即墙钟 | **尚未实测**；WSL 时代的 192.3 ms 不可沿用 |
-| 原生 Ubuntu（ffmpeg / V4L2） | `latency/measure_camera_latency.py` | 墙钟 pts 本身，无锚点 | 几十毫秒 |
+| 脚本 | 帧时间戳的构成 | 实测量级 |
+|---|---|---|
+| `latency/measure_camera_latency.py` | 墙钟 pts 本身，无锚点 | 几十毫秒（本机尚未实测） |
 
 Ubuntu：
 
@@ -227,7 +226,7 @@ gh release edit <tag> --latest                 # 需要占 Latest 位置时再�
 
 ### 名字不要跨命名空间
 
-`refs/tags/archive/wsl-20261120` 和 `refs/heads/archive/wsl-backend` 同属 `archive/`，`git log --decorate` 里混在一起，看图和补全都容易选错。标签用不带斜杠的平铺名：`wsl-backend-archive-20261120`、`data-sample-20261117`、`vendor-binaries-v1.0`。
+标签和分支别共用前缀：`refs/tags/archive/xxx` 与 `refs/heads/archive/yyy` 在 `git log --decorate` 里混成一片，看图和补全都容易选错。标签用不带斜杠的平铺名，例如 `wsl-backend-archive-20261120`、`data-sample-20261117`、`vendor-binaries-v1.0`。
 
 ### 删分支前先确认 tip 有标签
 
@@ -244,4 +243,4 @@ git tag --contains <sha>           # 标签能不能接管溯源
 
 - 冻结快照分支（如 `archive/wsl-backend`）**只加一个说明文件，不删任何代码**，checkout 出来必须能直接跑。
 - 它不参与合并。合并只会带进"相对分叉点的增量"，main 上的删除不受影响——想要回某段代码就显式 `git checkout <分支> -- <文件>`。
-- 归档分支的说明文档（`ARCHIVED.md`）在 main 上也要放一份，否则 main 里所有"见 ARCHIVED.md"都是死引用。
+- 说明文档只写在归档分支上（根目录 `ARCHIVED.md`），**main 不放副本**——两份必然不同步。main 要指路就只写分支名，别写文件名。

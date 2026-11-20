@@ -2,9 +2,9 @@
 
 ffmpeg reads ``/dev/videoN`` through V4L2 and stamps each frame with the host
 wall clock (``-use_wallclock_as_timestamps 1``), so the pts in the container
-*is* Unix epoch nanoseconds.  There is no second code path: the camera must be
-attached to the Linux host natively (2026-11-20 removed the WSL/DirectShow
-backend, archived on ``archive/wsl-backend``).
+*is* Unix epoch nanoseconds.  The camera must be attached to the Linux host
+directly: USB/IP forwarding drops isochronous packets and collapses 720p30 to
+about 5 fps.
 
 OpenCV ``read()`` only reports when the call returned; the frame may have waited
 in the driver queue for up to one frame period.  We therefore keep ffmpeg's own

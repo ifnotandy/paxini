@@ -12,7 +12,7 @@
 #             python3.10 capture/collect_cap.py --no-quest --cap-side right
 #             采完读 manifest.json 打印摘要并检查 verify.row_mismatch
 #
-#            相机只走 V4L2，手套直接接在主机串口上（2026-11-20 删除了 WSL/USBIP 路径）。
+#            相机走 V4L2，手套直接接在主机串口上。
 #
 # 【用法】（下面几条都在 Cap_Quest/ 根目录执行，脚本自己会 cd 到 capture/）
 #   bash scripts/run_capture_noquest.sh                  一直采，Ctrl+C 停（只按一次）

@@ -6,9 +6,7 @@
 直接回答「这台机器该用哪个 Δ」。本模块把每次测量的结论追加进一份固定文件，
 文件名就是「电脑用户-平台」：
 
-    latency/records/<user>-ubuntu.yaml  原生 V4L2 采集路径（当前唯一）
-    latency/records/archive/andy-win.yaml  WSL 时代的历史台账（只读，不要取数）
-    latency/records/ifnot-ubuntu.yaml  原生 Ubuntu 采集路径
+    latency/records/<user>-ubuntu.yaml  原生 Ubuntu 采集路径
 
 一台机器一个文件，换机器就多一个文件，互不覆盖。一条记录长这样，键是测量序号：
 
@@ -32,9 +30,6 @@
     print(entry["median_ms"])                       # 189.712
 
     rows = to_rows(load_records())                  # 摊平成列表，可直接喂 pandas
-
-    # 读另一台机器（比如在 ubuntu 上处理 win 采的数据）
-    data = load_records(Path(".../latency/records/archive/andy-win.yaml"))
 """
 
 from __future__ import annotations
@@ -59,22 +54,18 @@ MAX_DRIFT_MS = 10.0
 # 与上一次同类测量差超过这个值就提示：链路整体变了（驱动缓冲、曝光、换 USB 口）。
 DELTA_WARN_MS = 20.0
 
-PLATFORMS = ("win", "ubuntu")
-PLATFORM_BACKEND = {"win": "wsl", "ubuntu": "linux"}
-PLATFORM_LABEL = {
-    "win": "WSL 采集路径（相机走 Windows 的 ffmpeg.exe + DirectShow）",
-    "ubuntu": "原生 Ubuntu 采集路径（V4L2）",
-}
+PLATFORMS = ("ubuntu",)
+PLATFORM_BACKEND = {"ubuntu": "linux"}
+PLATFORM_LABEL = {"ubuntu": "原生 Ubuntu 采集路径（V4L2）"}
 
 # 每次重写都带上这段注释，手工改文件后也不会丢说明。
 HEADER = """\
 # 相机延迟测量记录 —— 一台机器一个文件，按测量顺序追加，不要手工改序号
 #
-# 文件名   <电脑用户>-<win|ubuntu>.yaml   例：andy-win.yaml / ifnot-ubuntu.yaml
+# 文件名   <电脑用户>-ubuntu.yaml   例：ifnot-ubuntu.yaml
 # 序号    同一台机器上的第几次测量，从 1 起递增；cam0 与 cam1 混排，看 camera 字段
 # 结果    median_ms 是推荐使用的 Δ（含显示链路，单位毫秒）
-# 合格    ok: true = 样本 >= 30 且 IQR <= 40 ms；原生 Ubuntu 还要求前后漂移 <= 10 ms
-#         （WSL 路径的 summary 不含 drift_ms，那一条判据对它自动跳过）
+# 合格    ok: true = 样本 >= 30、IQR <= 40 ms、前后漂移 <= 10 ms
 # 偏差    delta_prev_ms = 与上一次同参数测量的差；超过 20 ms 说明整条链路变了
 #
 # 下游读数
@@ -90,12 +81,12 @@ HEADER = """\
 
 
 def _local_platform() -> str:
-    """本机属于哪条采集路径：Windows 上跑 = win，Linux 上跑 = ubuntu。"""
-    return "win" if os.name == "nt" else "ubuntu"
+    """本机属于哪条采集路径。现在只有一条：原生 Ubuntu。"""
+    return "ubuntu"
 
 
 def machine_key(platform: str, user: str | None = None) -> str:
-    """``andy-win`` 这种「电脑用户-平台」标识，同时用作文件名主干。"""
+    """``ifnot-ubuntu`` 这种「电脑用户-平台」标识，同时用作文件名主干。"""
     if platform not in PLATFORMS:
         raise RuntimeError(f"platform 只能是 {PLATFORMS}，收到 {platform!r}")
     name = (user or getpass.getuser() or "unknown").strip()
@@ -135,9 +126,8 @@ def _now() -> str:
 def _default_record_file() -> Path:
     """不传路径时读哪一份。
 
-    先按「本机平台」找（原生 Ubuntu 上就是 ``<user>-ubuntu.yaml``）；找不到再
-    看目录里是不是只有一份——WSL 里跑数据处理时，脚本平台是 ubuntu，但要读的
-    其实是 Windows 侧测出来的 ``<user>-win.yaml``，这种情况必须能用。
+    先按「本机平台」找（就是 ``<user>-ubuntu.yaml``）；找不到再看目录里是不是
+    只有一份——换了用户名、或者从别人机器拷了一份台账过来时，只有一份就一定是它。
     """
     primary = record_path()
     if primary.is_file():
@@ -244,7 +234,7 @@ def to_rows(data: dict[str, Any] | None = None) -> list[dict[str, Any]]:
 def judge(stats: dict[str, Any]) -> tuple[bool, list[str]]:
     """按判据给结论，返回 (是否合格, 不合格原因)。
 
-    ``drift_ms`` 缺失时跳过那一条：WSL 路径的 summarize 不算前后漂移。
+    ``drift_ms`` 缺失时跳过那一条（早期记录可能没有这个字段）。
     """
     reasons: list[str] = []
     samples = int(stats.get("samples") or 0)
@@ -264,8 +254,8 @@ def _comparable_previous(
 ) -> dict[str, Any] | None:
     """找上一次可直接对比的测量：同相机、合格、采集参数没变。
 
-    WSL 路径的延迟会整体跳（DirectShow 缓冲从 1 帧涨到 3~4 帧就是 +100 ms），
-    跟上一次比一下最容易发现「链路变了但数据看起来都正常」。
+    延迟会整体跳（驱动缓冲从 1 帧涨到 3~4 帧就是 +100 ms），跟上一次比一下最
+    容易发现「链路变了但数据看起来都正常」。
     """
     keys = ("width", "height", "codec")
     for seq in sorted(measurements, reverse=True):
