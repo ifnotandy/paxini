@@ -26,13 +26,10 @@ command -v ffmpeg
 ffmpeg -hide_banner -version | head -1
 ```
 
-采集要求 ffmpeg 5.0 以上。若 PATH 中的版本太旧，将它指向任意可用的静态版：
-
-```bash
-export FFMPEG=/path/to/ffmpeg-5-or-newer
-```
-
-项目会优先读取 `FFMPEG`，其次从 `PATH` 查找。
+采集要求 ffmpeg 5.0 以上（要 `-fps_mode`）。apt 的 22.04 版是 4.4.2，不满足；换静态版
+的步骤见 [`../README.md` §1.1](../README.md)，装好后 `/usr/local/bin/ffmpeg` 会盖在
+`/usr/bin/ffmpeg` 前面，**不需要再设 `FFMPEG`**。项目仍按 `--ffmpeg` → `$FFMPEG` →
+`PATH` 的顺序找。
 
 ### 3. 检查设备并采集
 

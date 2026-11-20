@@ -10,8 +10,7 @@ sudo dpkg -i ../sdk/pxhandsdk_1.0.0.0.ubantu2204_amd64.deb
 python3.10 -m pip install --user -r ../requirements.txt
 
 # 1) 确认设备在
-export FFMPEG=/path/to/ffmpeg-5-or-newer
-python3.10 capture/collect_cap.py --list-devices    # 串口末尾应是 PXCap
+python3.10 capture/collect_cap.py --list-devices    # 串口末尾应是 PXCap，ffmpeg 应 ≥ 5.0
 
 # 2) 不接硬件先自检
 python3.10 selftest/selftest.py                     # 全过
@@ -74,10 +73,12 @@ Ubuntu：
 
 ```bash
 cd <repo>/Paxini-Cap/Cap_Quest
-export FFMPEG=/path/to/ffmpeg-5-or-newer
 sudo timedatectl set-ntp false          # pts 走 CLOCK_REALTIME，测完记得开回来
 python3.10 latency/measure_camera_latency.py
 ```
+
+ffmpeg 必须是 5.0 以上（静态版装法见 `Paxini-Cap/README.md` §1.1）。还要有显示会话
+——脚本用 `cv2.imshow` 弹二维码窗口，SSH 里没有 `DISPLAY` 会被 `check_display()` 直接拦下。
 
 **默认逐路测 cam0 和 cam1、每路录 20 秒**，所以上面两条命令都不带参数。枚举到的第 3 路
 （笔记本自带的 `USB2.0 HD UVC WebCam`）不参与采集，脚本会自动跳过；只想测一路加

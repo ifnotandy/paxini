@@ -83,6 +83,38 @@ python -m pip install --force-reinstall --no-deps opencv-python
 
 **对策**：提交前统一一次。
 
+### apt 的 ffmpeg 是 4.4.2，没有 `-fps_mode`
+
+**现象**：相机那一路起不来，log 里是 `Unrecognized option 'fps_mode'`；
+`data.h5` 里没有 `cameras/`，手套照常 120 Hz，很容易误判成 USB 带宽不够。
+
+**根因**：`-fps_mode` 是 5.0 才加的，Ubuntu 22.04 的 apt 源最高 4.4.2。
+
+**对策**：换静态版装在 `/usr/local/bin`（在 `/usr/bin` 之前），步骤见
+`Paxini-Cap/README.md` §1.1。2026-11-20 在本机 Ubuntu 22.04 上装的是 7.0.2-static。
+
+### ffmpeg 7 带 `-nostdin` 时吞掉第一次 SIGINT
+
+**现象**：`Ctrl+C` 停采集，相机那两路要等满 `STOP_TIMEOUT_S`（4 s）后被 `kill()`，
+manifest 里记 `ffmpeg 退出码 -9` 或"未在 4 秒内退出"，mkv 没有 trailer。
+
+**根因**：ffmpeg 7 配 `-nostdin` 时信号只在 `stdin_interaction` 打开的分支里被处理，
+第一次 SIGINT 只计数、不触发收尾；第二个 SIGINT/SIGTERM 才走"immediate exit"，
+直接返回 255 但不写容器尾部。ffmpeg 4.4.2 没这个问题。
+
+**实测**（Ubuntu 22.04 + 7.0.2-static + 720p UVC）：
+
+| 命令 | 一次 SIGINT 后 |
+|---|---|
+| 7.0.2 + `-nostdin` | 15 s 仍存活，SIGKILL 收场 |
+| 7.0.2 去掉 `-nostdin`（stdin=`/dev/null`） | 0.4 s 退出，rc=255，mkv 完整（120/120 帧） |
+| 4.4.2 + `-nostdin` | 0.2 s 退出 |
+
+**对策**：代码里已经删掉 `-nostdin`，靠 `Popen(stdin=DEVNULL)` 达到同样效果；
+`stop()` 把 255 当成正常中断而不是失败。**别再把它加回去**，`selftest` 有反向断言。
+
+**另一条**：ffmpeg 被中断时退出码是 **255**，不是 0。判"正常停止"必须把 255 算进去。
+
 ## 三、会静默毁数据
 
 ### 时间轴整体偏几百毫秒，但没有任何报错

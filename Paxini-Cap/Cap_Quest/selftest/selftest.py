@@ -1118,7 +1118,8 @@ def test_camera_command(tmp_root: Path) -> None:
         "v4l2" in cmd
         and "-use_wallclock_as_timestamps" in cmd
         and "/dev/video0" in cmd
-        and "-nostdin" in cmd,
+        # 不能带 -nostdin：ffmpeg 7 下它会吞掉第一次 SIGINT，容器收不了尾。
+        and "-nostdin" not in cmd,
         " ".join(cmd[:6]),
     )
     check(
@@ -1148,6 +1149,30 @@ def test_camera_command(tmp_root: Path) -> None:
         "相机命令/显式设备节点保留路径",
         devices["cam0"] == "/dev/video2",
         devices["cam0"],
+    )
+
+    class _InterruptedProcess:
+        """Fake ffmpeg that finalises on SIGINT and therefore exits 255."""
+
+        def __init__(self) -> None:
+            self.returncode: int | None = None
+
+        def poll(self) -> int | None:
+            return self.returncode
+
+        def send_signal(self, _sig: int) -> None:
+            pass
+
+        def wait(self, timeout: float | None = None) -> int:
+            self.returncode = 255
+            return self.returncode
+
+    cam.process = _InterruptedProcess()
+    cam.stop()
+    check(
+        "相机命令/SIGINT 收尾的退出码 255 不算失败",
+        cam.failure is None,
+        str(cam.failure),
     )
 
 

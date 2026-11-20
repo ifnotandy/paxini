@@ -3,8 +3,9 @@
 # 必须用系统 python3.10 安装，不要用 venv（该环境 ensurepip 会失败）：
 #   python3.10 -m pip install --user -r requirements.txt
 #
-# 已验证版本：numpy 2.2.6 / h5py 3.16.0 / matplotlib 3.10.9 / PyYAML 6.0.1 /
-#             xrobotoolkit-sdk（最新）
+# 已验证版本（2026-11-20，Ubuntu 22.04 + python3.10.12）：
+#   numpy 2.2.6 / h5py 3.16.0 / matplotlib 3.10.9 / PyYAML 6.0.3 /
+#   xrobotoolkit-sdk 1.1.0 / opencv-python 5.1.0 / qrcode（[pil] 装 Pillow）
 numpy>=1.24
 h5py>=3.8
 # capture/collect_cap.py 读 cap_config.yaml
@@ -12,3 +13,7 @@ pyyaml>=6.0
 # visualize.py 用；窗口模式还需要系统包 python3.10-tk（--html 不用）
 matplotlib>=3.7
 xrobotoolkit-sdk
+# 只有 latency/measure_camera_latency.py 用：生成并解码二维码。
+# opencv 依赖系统的 libGL.so.1（apt install libgl1），缺了 import cv2 就报错。
+opencv-python
+qrcode[pil]

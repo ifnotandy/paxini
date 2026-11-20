@@ -109,13 +109,17 @@ Paxini-Cap/
   表格类布局别用 `family="monospace"`。
 - **Write 工具产出 CRLF**，仓库其余文件都是 LF，提交前统一一次。
 - 没有 `python3.10-tk` 时开不了窗口，用 `visualize.py --html`。
+- **ffmpeg 7 加 `-nostdin` 会吞掉第一次 SIGINT**，相机容器收不了尾；相机命令里不要
+  再加这个参数（`Popen` 已经给 `stdin=DEVNULL`），详见 [`agent/pitfalls.md`](../agent/pitfalls.md)。
+- `opencv-python` 需要系统的 `libGL.so.1`（`apt install libgl1`），缺了 `import cv2`
+  直接报错；测延迟才会用到。
 
 ### 0.4 改完必须过的三关
 
 ```bash
 cd Cap_Quest
-python3.10 -m py_compile capture/*.py viewer/*.py selftest/*.py latency/*.py calib/*.py
-python3.10 -m pyflakes capture/*.py viewer/*.py selftest/*.py latency/*.py calib/*.py
+python3.10 -m py_compile capture/*.py viewer/*.py selftest/*.py latency/*.py calib/*.py diagnostics/*.py
+python3.10 -m pyflakes capture/*.py viewer/*.py selftest/*.py latency/*.py calib/*.py diagnostics/*.py
 python3.10 selftest/selftest.py          # 应为全过
 ```
 
@@ -131,15 +135,47 @@ python3.10 selftest/selftest.py          # 应为全过
 | 系统 | Ubuntu 22.04 / 24.04（原生安装） |
 | Python | **`python3.10`**。系统 `python3` 是 3.12，此时 `import pxhandsdk` 能过但 `hasattr(pxhandsdk,"PxCap3")` 为 False |
 | 手套 SDK | `pxhandsdk 1.0.0.0`，`dpkg -i` 装到 `/usr/lib/python3/pxhandsdk` |
-| Python 包 | `numpy` / `h5py` / `xrobotoolkit-sdk`，用 `python3.10 -m pip install --user` |
+| Python 包 | `numpy>=1.24` / `h5py>=3.8` / `pyyaml>=6` / `matplotlib>=3.7` / `xrobotoolkit-sdk`，用 `python3.10 -m pip install --user -r requirements.txt` |
+| 延迟测量额外包 | `opencv-python` / `qrcode[pil]`（生成并解码二维码，只有 `latency/` 用；已在 `requirements.txt` 里） |
 | 回放 | `matplotlib`（随 requirements 装）；窗口模式还要 `python3.10-tk`，`--html` 不需要 |
-| ffmpeg | 需要带 `v4l2` 输入和 `-fps_mode` 的版本（5.0+）。系统未提供时，把静态版目录加入 `PATH`，或通过 `FFMPEG` 指定 |
-| ffmpeg | 5.0 以上，需带 `v4l2` 输入与 `-fps_mode`；系统没装就用静态版并通过 `$FFMPEG` 指定 |
+| 系统工具 | `v4l-utils`（`v4l2-ctl`，排查相机）、`libgl1`（`opencv-python` 依赖）、`adb`（Quest） |
+| ffmpeg | **5.0 以上**，需带 `v4l2` 输入、`-fps_mode`、`ffprobe`。apt 的 22.04 版是 4.4.2，**没有 `-fps_mode`，跑采集会在相机启动那一步失败**，必须换静态版，装法见 §1.1 |
 
 不要用 `python3.10 -m venv`：这个环境里 ensurepip 会失败，直接用系统 3.10 加
 `--user` 装包。
 
-### 1.1 运行 XRoboToolKit 的前置条件
+### 1.1 ffmpeg：换静态版（必做一次）
+
+`-fps_mode` 是 5.0 才有的选项，`camera_ffmpeg.py` 的相机命令里硬用着它。apt 源里
+22.04 最高只有 4.4.2，所以必须换静态版。下面这套在 Ubuntu 22.04 上实测通过：
+
+```bash
+cd /tmp
+wget -q -O ffmpeg-static.tar.xz \
+  https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz
+mkdir -p ff_static_x && tar -xf ffmpeg-static.tar.xz -C ff_static_x
+
+sudo mkdir -p /opt/ffmpeg-7.0.2
+sudo cp ff_static_x/ffmpeg-*-amd64-static/{ffmpeg,ffprobe} /opt/ffmpeg-7.0.2/
+sudo chmod 755 /opt/ffmpeg-7.0.2/ffmpeg /opt/ffmpeg-7.0.2/ffprobe
+# /usr/local/bin 在 /usr/bin 之前，装在这里就不用每次 export FFMPEG
+sudo ln -sf /opt/ffmpeg-7.0.2/ffmpeg  /usr/local/bin/ffmpeg
+sudo ln -sf /opt/ffmpeg-7.0.2/ffprobe /usr/local/bin/ffprobe
+
+hash -r && ffmpeg -version | head -1     # 应为 7.x-static
+ffmpeg -hide_banner -devices | grep v4l2          # 有 v4l2 输入
+ffmpeg -hide_banner -h full | grep -c fps_mode    # 非 0
+```
+
+三条都要过。只用 apt 的 4.4.2 也能启动 ffmpeg，但 `-fps_mode` 会直接报
+`Unrecognized option 'fps_mode'`，表现为相机一路起不来、`data.h5` 里没有
+`cameras/`，很容易误判成 USB 带宽问题。
+
+**不要用 `-nostdin`。** ffmpeg 7 带 `-nostdin` 时会吞掉第一次 SIGINT，容器收不了尾
+（详见 [`agent/pitfalls.md`](../agent/pitfalls.md)）；代码里已经去掉，靠
+`stdin=DEVNULL` 达到同样效果。
+
+### 1.2 运行 XRoboToolKit 的前置条件
 
 Quest 数据链路不是只装一个 Python 包就能工作。开始采集前必须同时满足以下条件：
 
@@ -207,18 +243,26 @@ PC Service、Quest Wi-Fi、APK 的 Tracking/Send 开关和手柄唤醒状态。
 ## 3. 安装（只做一次）
 
 ```bash
+# 系统依赖
+sudo apt install -y python3.10-tk v4l-utils libgl1
+
+# 手套 SDK + 串口权限
 sudo dpkg -i sdk/pxhandsdk_1.0.0.0.ubantu2204_amd64.deb
 sudo /usr/share/pxhandsdk/scripts/setup-serial-access.sh
+sudo usermod -aG dialout "$USER"
 # 重新登录让 dialout 生效
 
+# Python 依赖（含延迟测量用的 opencv / qrcode）
 python3.10 -m pip install --user -r requirements.txt
+
+# ffmpeg 5.0+（apt 的 4.4.2 不够），见 §1.1
 ```
 
 装完先跑 §0.4 的三关：`selftest` 全过说明环境没问题，此时不需要插硬件。
 
 **验证设备与日常运行不在本文档**：`--list-devices`、采集、`--view`、回放、
 参数表全在 [`Cap_Quest/README.md` §1](Cap_Quest/README.md)。采前关 NTP、
-`export FFMPEG=/path/to/ffmpeg-5-or-newer`、没有头显加 `--no-quest` 这三条纪律，在该文件的
+确认 ffmpeg 是 5.0 以上、没有头显加 `--no-quest` 这三条纪律，在该文件的
 【快速开始】与【§2 时间戳】里各有完整说明，这里不再重列。
 
 ## 4. 验证状态

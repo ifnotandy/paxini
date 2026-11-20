@@ -343,8 +343,11 @@ class FfmpegCamera:
 
     def command(self) -> list[str]:
         command = [self.ffmpeg, "-hide_banner"]
+        # No ``-nostdin``: ffmpeg 7 with -nostdin swallows the first SIGINT and
+        # never finalises the container (measured on Ubuntu 22.04 + ffmpeg
+        # 7.0.2 static + UVC; 4.4.2 was unaffected). ``start()`` already gives
+        # the child /dev/null as stdin, which is what -nostdin was protecting.
         command += [
-            "-nostdin",
             "-loglevel",
             "warning",
             "-nostats",
@@ -568,7 +571,10 @@ class FfmpegCamera:
                     process.wait(timeout=2.0)
                 except subprocess.TimeoutExpired:
                     warn(f"PXCap {self.camera_id} 摄像头进程无法结束")
-        if process.returncode not in (0, -signal.SIGINT, 130):
+        # ffmpeg exits 255 on a handled SIGINT ("Exiting normally, received
+        # signal 2"), so 255 after our own interrupt is a clean stop, not a
+        # failure. A camera that died mid-recording is caught by poll_health().
+        if process.returncode not in (0, 255, -signal.SIGINT, 130):
             detail = self.log_tail()
             message = f"ffmpeg 退出码 {process.returncode}" + (
                 f"，日志：{detail}" if detail else ""

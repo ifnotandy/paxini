@@ -53,9 +53,13 @@ ffmpeg 让每帧 pts 直接取主机墙钟并原样写进容器，停止后用 `
 
 ```bash
 cd Paxini-Cap/Cap_Quest
-export FFMPEG=/path/to/ffmpeg-5-or-newer
 python3.10 capture/collect_cap.py --list-devices
 ```
+
+ffmpeg 需要 5.0 以上（要 `-fps_mode`）。当前 Ubuntu 机器已经把静态版装在
+`/usr/local/bin`，`--list-devices` 会直接打印 `7.0.2-static`，**不用再 export
+`FFMPEG`**。换一台机器时才按 [`../README.md` §1.1](../README.md) 换静态版，或者
+`export FFMPEG=/path/to/ffmpeg-5-or-newer` 指过去。
 
 `--list-devices` 打印串口（含 USB VID:PID 与 by-id）、视频设备和 ffmpeg 版本。
 先确认两件事：
@@ -116,10 +120,10 @@ Quest      可选。PC Service / ADB / 轮询起不来只告警，继续采手�
 参数拼装）与 `collect_cap.py --help` 完全重复，而且三源解耦之后启动条件不再是「先查齐再跑」，
 脚本那套前置检查反而会挡住合法的部分采集（比如只接一路相机）。
 
-现在就是三条命令，顺序别改：
+现在就是两条命令，顺序别改（ffmpeg 已装在 `/usr/local/bin`，换机器才需要
+`export FFMPEG=...`）：
 
 ```bash
-export FFMPEG=/path/to/ffmpeg-5-or-newer
 sudo timedatectl set-ntp false
 python3.10 capture/collect_cap.py --no-quest          # 没有头显时
 ```
@@ -137,7 +141,7 @@ python3.10 capture/collect_cap.py --no-quest          # 没有头显时
 |---|---|---|
 | Python | 系统 `python3` 是 3.12，`PxCap3` 只在 `python3.10` 里 | 用 `python3.10`（或 `PYTHON=` 指定） |
 | 手套 SDK | `pxhandsdk 1.0.0.0` 已 `dpkg` 装 | 装 SDK + `setup-serial-access.sh` + 重登让 `dialout` 生效 |
-| ffmpeg | 静态版已在 `PATH` 或 `$FFMPEG` | 5.0 以上，需带 `v4l2` 输入与 `-fps_mode` |
+| ffmpeg | 静态版 7.0.2 在 `/usr/local/bin` | 5.0 以上，需带 `v4l2` 输入与 `-fps_mode`，装法见 [`../README.md` §1.1](../README.md) |
 
 相机走 `/dev/videoN`，节点序号可能随机（两路同型号尤其明显），所以默认 `auto` 每次
 自己枚举；要钉死就写 `--camera-0 /dev/video2 --camera-1 /dev/video0`。
@@ -489,7 +493,7 @@ view: false              # 采集时开实时窗口
 
 ### 6.2 参数表
 
-下表覆盖 `cap_config.yaml` 里的全部 22 个字段（键名把 `-` 换成 `_`），另列了一批只在命令行
+下表覆盖 `cap_config.yaml` 里的全部 21 个字段（键名把 `-` 换成 `_`），另列了一批只在命令行
 用的参数——那些是一次性的，不写进配置文件。字段的取值含义、代价与坑写在该文件的行内注释里。
 
 | 参数 | 默认 | 说明 |
@@ -527,8 +531,9 @@ view: false              # 采集时开实时窗口
 | `--start-pc-service` / `--pc-service-script` / `--no-pc-service-check` | — | PC Service 管理 |
 | `--config` | `cap_config.yaml` | 配置文件路径（YAML；旧的 JSON 也能解析） |
 
-ffmpeg/ffprobe 从 `PATH` 找，也认环境变量 `FFMPEG`。不使用统一系统路径时，
-先执行 `export FFMPEG=/path/to/ffmpeg-5-or-newer`。
+ffmpeg/ffprobe 从 `PATH` 找，也认环境变量 `FFMPEG`。只是要 5.0 以上——apt 的
+22.04 版是 4.4.2，没有 `-fps_mode`，相机那一路会在启动时就失败。装法见
+[`../README.md` §1.1](../README.md)。
 
 ### 6.3 相机：只有 V4L2
 
@@ -651,6 +656,7 @@ ls -l /dev/serial/by-id/ /dev/ttyACM* /dev/ttyUSB* 2>/dev/null
 | 回调耗时（60 秒合成帧） | 均值 0.21 ms、最大 0.62 ms |
 | 文件体积（合成数据） | 3.6 KB/行 ≈ 1.57 GB/小时（120 Hz，444 点全量） |
 | ffmpeg 链路（lavfi 合成源） | 首帧 pts 1794388000，间隔 33/34 ms，SIGINT 后 ffprobe 能读全帧 |
+| ffmpeg 7.0.2 + V4L2 真采（2026-11-20，Ubuntu 22.04，笔记本 UVC 720p30 `copy`，4 s） | 120 帧 / 1280×720 / 30 fps，pts 是墙钟；单次 SIGINT **0.4 s** 收尾，容器完整（ffprobe 无 `File ended prematurely`），日志无 warning。开预览的第二路输出同样验过（4 s 出 18 帧 JPEG ≈ 5 fps）。**前提是命令里没有 `-nostdin`** |
 | `visualize.py`（合成 data.h5，7200 帧 / 60 s） | 窗口与 `--html` 都能出图；HTML 1.45 MB；实测回放 1.01× 实时；`--save-png` 首帧正常 |
 | `live_view.py`（合成 1200 帧 @120 Hz） | 子进程正常起停；父进程 `push` 均值 **130 µs**、p99 262 µs；240 帧队列零丢弃；`close` 30 ms |
 | Quest 左手真机联调（2026-11-18） | XRoboToolKit `controller.left` 连续有效；PXCap 1200 帧 / 120.0 Hz、Quest 2400 样本、两路相机各 245 / 300 帧 / 15 fps；37 个数据集行数自检通过 |
