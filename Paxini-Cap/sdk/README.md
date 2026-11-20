@@ -62,8 +62,9 @@ mv XRoboToolkit-Quest-1.0.1.apk xrobotoolkit/
 
 ### 系统 python3 是 3.12 时报依赖不满足
 
-官方 `pxhandsdk` deb 声明 `Depends: python3 (<< 3.11)`，而 Ubuntu 22.04 上
-`python3` 已经是 **3.12**，所以：
+官方 `pxhandsdk` deb 声明 `Depends: python3 (<< 3.11)`。**Ubuntu 22.04 的 `python3`
+是 3.10，原始包直接装得上**（2026-11-20 在 22.04 + 3.10.12 上实测 `dpkg -i` 成功、
+`hasattr(pxhandsdk,"PxCap3")` 为 `True`）；**24.04 的 `python3` 才是 3.12**，在那类机器上：
 
 - `sudo dpkg -i` 直接失败（依赖不满足）
 - 跟着跑 `sudo apt-get install -f` 更糟：它会把刚装的包**卸掉**
