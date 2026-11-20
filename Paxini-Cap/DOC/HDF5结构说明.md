@@ -220,8 +220,7 @@ V4L2 驱动在每次出帧的 `v4l2_buffer.flags` 里声明时钟类型（`TIMES
 这种错比报错危险，因此本工程不用它。
 
 现在只有一种做法：ffmpeg 用 `-use_wallclock_as_timestamps 1` 给每帧打主机墙钟，
-并校验首帧 pts 必须是墙钟量级（≤ 1.5e9 直接报错），不做推断、不留选项。这是
-`camera_backend: linux` 的路径。
+并校验首帧 pts 必须是墙钟量级（≤ 1.5e9 直接报错），不做推断、不留选项。
 
 ### 5.2 `wsl` 后端：两个 epoch + 相对 pts
 
