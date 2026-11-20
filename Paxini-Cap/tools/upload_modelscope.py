@@ -146,16 +146,6 @@ def build_zip(recording: Path, archive: Path) -> None:
     log(f"  打包 {archive.name}：{count} 个文件，{archive.stat().st_size / 2**20:.1f} MB")
 
 
-def write_sums(staging: Path, archives: list[Path]) -> Path:
-    path = staging / SUMS_NAME
-    lines = []
-    for archive in sorted(archives):
-        lines.append(f"{sha256_file(archive)}  {archive.name}")
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    log(f"  写入 {SUMS_NAME}（{len(lines)} 条）")
-    return path
-
-
 def write_sums(staging: Path, entries: dict[str, str]) -> Path:
     path = staging / SUMS_NAME
     lines = [f"{digest}  {name}" for name, digest in sorted(entries.items())]
