@@ -5,8 +5,10 @@
 
 # ---------- 采集数据 / 录像（体积极大，仅保留本地）----------
 厂商数据采集/
-**/recordings/
-**/Recordings/
+# 用 /* 而不是 /：排除目录本身会让括号里的 ! 失效，README 就放行不了
+**/recordings/*
+**/Recordings/*
+!Paxini-Cap/Recordings/README.md
 **/clock_probe/
 *.mkv
 *.mp4
