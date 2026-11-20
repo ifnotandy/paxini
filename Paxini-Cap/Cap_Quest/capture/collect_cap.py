@@ -5,15 +5,22 @@ PXCap III is a data glove: it has no motors, so this program cannot move
 anything. It connects the glove, reads its identity, firmware, fault state and
 SN, then starts the SDK collection callback.
 
-Timing policy (identical to ``Dex_Quest/collect_hand_pose.py``):
+Timing policy (deliberately different from ``Dex_Quest/collect_hand_pose.py``):
 
-- One host Unix-nanosecond axis. The glove frame carries
-  ``timestamp_unix_ns`` from the SDK; Quest samples are stamped with the
-  midpoint of the host-side SDK polling call; video frames carry the pts that
-  ffmpeg took from the host wall clock at capture time.
-- Pairing is nearest neighbour only: no interpolation, no averaging.
-- Every skew is an absolute value. A frame outside tolerance is recorded as an
-  unmatched row, never dropped.
+- Three independent row axes. ``/cap`` has one row per glove frame, ``/quest``
+  one row per SDK sample, ``/cameras/<id>`` one timestamp per video frame. The
+  row counts are never equal and none of them may be used as an index into
+  another.
+- Nothing is paired, interpolated or matched here. Pairing belongs to
+  ``Paxini-Align``; doing it at capture time would bake one policy into every
+  file forever. Do not add alignment to this module.
+- Every timestamp is the one the device/SDK/driver produced. No host-side
+  reading is appended on top: a second clock source makes the columns
+  incomparable and is impossible to undo downstream.
+
+The three sources start independently and are never waited for in sequence;
+readiness is polled from the capture loop, so one dead camera or a headset that
+never connects cannot hold up the others.
 
 The glove callback runs on an SDK-owned thread and must stay short: it copies
 the frame into numpy arrays and pushes them into a queue. All file writing
@@ -60,12 +67,12 @@ if str(_VIEWER_DIR) not in sys.path:
     sys.path.insert(0, str(_VIEWER_DIR))
 
 from camera_ffmpeg import (
+    CameraReadiness,
     FfmpegCamera,
     discover_video_nodes,
     ffmpeg_version,
     find_ffmpeg,
     interrupt_running_cameras,
-    wait_for_cameras_ready,
 )
 from quest3 import (
     BUTTON_METHODS,
@@ -589,6 +596,11 @@ class Hdf5Recorder:
         self._last_cap_unix_ns: int | None = None
         self._first_cap_mono_ns: int | None = None
         self._last_cap_mono_ns: int | None = None
+        # Quest timestamps are stored as opaque SDK values (domain unverified),
+        # so this window is only reported as "first/last SDK stamp", never as a
+        # Unix instant.
+        self._first_quest_sdk_ns: int | None = None
+        self._last_quest_sdk_ns: int | None = None
 
         self._cap_datasets: dict[str, h5py.Dataset] = {}
         self._quest_datasets: dict[str, h5py.Dataset] = {}
@@ -707,6 +719,11 @@ class Hdf5Recorder:
             self.flush_cap()
 
     def write_quest(self, row: dict[str, Any]) -> None:
+        sdk_ns = int(row.get("quest/sdk_timestamp_ns") or -1)
+        if sdk_ns > 0:
+            if self._first_quest_sdk_ns is None:
+                self._first_quest_sdk_ns = sdk_ns
+            self._last_quest_sdk_ns = sdk_ns
         self._quest_pending.append(row)
         if len(self._quest_pending) >= self.flush_rows:
             self.flush_quest()
@@ -863,6 +880,17 @@ class Hdf5Recorder:
         if self._first_cap_unix_ns is None or self._last_cap_unix_ns is None:
             return None
         return self._first_cap_unix_ns, self._last_cap_unix_ns
+
+    def cap_window_monotonic_ns(self) -> tuple[int, int] | None:
+        if self._first_cap_mono_ns is None or self._last_cap_mono_ns is None:
+            return None
+        return self._first_cap_mono_ns, self._last_cap_mono_ns
+
+    def quest_window_sdk_ns(self) -> tuple[int, int] | None:
+        """First/last non-negative ``quest/sdk_timestamp_ns``, domain unverified."""
+        if self._first_quest_sdk_ns is None or self._last_quest_sdk_ns is None:
+            return None
+        return self._first_quest_sdk_ns, self._last_quest_sdk_ns
 
     # -- verification ------------------------------------------------------
     def verify_rows(self) -> dict[str, Any]:
@@ -1193,6 +1221,96 @@ class QuestPoller(threading.Thread):
             STOP_EVENT.set()
 
 
+class QuestReadiness:
+    """Non-blocking Quest readiness check.
+
+    Same criteria as :func:`wait_for_quest_ready` — ``required_samples``
+    consecutive fresh samples carrying a tracked selected pose — but the caller
+    decides when to look. A headset that never comes up must only cost a
+    warning: the glove and the cameras are independent sources.
+    """
+
+    def __init__(
+        self,
+        stream: TimedStream,
+        pose_source: str,
+        pose_side: str,
+        timeout_s: float,
+        required_samples: int,
+    ) -> None:
+        self.stream = stream
+        self.pose_source = pose_source
+        self.pose_side = pose_side
+        self.timeout_s = float(timeout_s)
+        self.required_samples = max(1, int(required_samples))
+        self.started = time.monotonic()
+        self.deadline = self.started + self.timeout_s
+        self.last_sequence = -1
+        self.consecutive = 0
+        self.ready_sample: TimedSample | None = None
+        self.ready_wait_s: float | None = None
+        self.timed_out = False
+        self._last_report = self.started
+
+    @property
+    def source_text(self) -> str:
+        if self.pose_source == "head":
+            return "head"
+        return f"{self.pose_source}.{self.pose_side}"
+
+    @property
+    def ready(self) -> bool:
+        return self.ready_sample is not None
+
+    @property
+    def pending(self) -> bool:
+        return not self.ready and not self.timed_out
+
+    def poll(self) -> bool:
+        """Advance once; True only on the call that confirms readiness."""
+        if not self.pending:
+            return False
+        now = time.monotonic()
+        sample = self.stream.latest()
+        if sample is not None and sample.data.get("sequence") != self.last_sequence:
+            self.last_sequence = sample.data.get("sequence")
+            pose = extract_selected_pose(
+                sample.data, self.pose_source, self.pose_side
+            )
+            if pose["tracked"] and pose["pose_xyzw"] is not None:
+                self.consecutive += 1
+                if self.consecutive >= self.required_samples:
+                    self.ready_sample = sample
+                    self.ready_wait_s = now - self.started
+                    return True
+            else:
+                self.consecutive = 0
+
+        if now - self._last_report >= 5.0:
+            latest_text = (
+                f"最新 SDK 序号 {self.last_sequence}"
+                if self.last_sequence >= 0
+                else "尚未收到 SDK 样本"
+            )
+            log(
+                f"[等待 Quest] {now - self.started:.1f}/{self.timeout_s:g} 秒，"
+                f"{latest_text}，连续有效 pose={self.consecutive}"
+            )
+            self._last_report = now
+        if now >= self.deadline:
+            self.timed_out = True
+        return False
+
+    def timeout_message(self) -> str:
+        return (
+            f"等待 {self.source_text} 6D pose 超时。请确认：\n"
+            "  1. Quest 与电脑在同一局域网，PC Service 正在运行；\n"
+            "  2. XRoboToolKit APK 已由 ADB 启动，并开启 Tracking 和 Send；\n"
+            "  3. 使用 controller 时手柄已唤醒；使用 hand 时手部追踪有效；\n"
+            "  4. 当前选中侧确实被追踪。"
+        )
+
+
 def wait_for_quest_ready(
     stream: TimedStream,
     pose_source: str,
@@ -1200,62 +1318,34 @@ def wait_for_quest_ready(
     timeout_s: float,
     required_samples: int,
 ) -> tuple[TimedSample, float]:
-    """Wait until Quest continuously supplies a valid selected 6D pose."""
-    started = time.monotonic()
-    deadline = started + timeout_s
-    last_sequence = -1
-    consecutive = 0
-    last_report = started
-    source_text = (
-        "head"
-        if pose_source == "head"
-        else f"{pose_source}.{pose_side}"
+    """Blocking wrapper around :class:`QuestReadiness`.
+
+    ``collect_cap.py`` no longer blocks on this: the capture loop polls the
+    tracker so the cameras and the glove can start without a headset.
+    """
+    readier = QuestReadiness(
+        stream, pose_source, pose_side, timeout_s, required_samples
     )
     log(
-        f"[INFO] 等待 Quest PC Service 收到有效的 {source_text} 6D pose；"
+        f"[INFO] 等待 Quest PC Service 收到有效的 {readier.source_text} 6D pose；"
         f"需要连续 {required_samples} 帧，超时 {timeout_s:g} 秒"
     )
-
-    while not STOP_EVENT.is_set() and time.monotonic() < deadline:
-        sample = stream.latest()
-        if sample is not None and sample.data.get("sequence") != last_sequence:
-            last_sequence = sample.data.get("sequence")
-            pose = extract_selected_pose(sample.data, pose_source, pose_side)
-            if pose["tracked"] and pose["pose_xyzw"] is not None:
-                consecutive += 1
-                if consecutive >= required_samples:
-                    elapsed = time.monotonic() - started
-                    log(
-                        f"[INFO] Quest 数据链路已确认：收到连续 {consecutive} 帧"
-                        f"有效 {source_text} pose，等待 {elapsed:.1f} 秒"
-                    )
-                    return sample, elapsed
-            else:
-                consecutive = 0
-
-        now = time.monotonic()
-        if now - last_report >= 5.0:
-            latest_text = (
-                f"最新 SDK 序号 {last_sequence}"
-                if last_sequence >= 0
-                else "尚未收到 SDK 样本"
-            )
+    while True:
+        if readier.poll():
             log(
-                f"[等待 Quest] {now - started:.1f}/{timeout_s:g} 秒，"
-                f"{latest_text}，连续有效 pose={consecutive}"
+                f"[INFO] Quest 数据链路已确认：收到连续 "
+                f"{readier.consecutive} 帧有效 {readier.source_text} pose，"
+                f"等待 {readier.ready_wait_s:.1f} 秒"
             )
-            last_report = now
+            assert readier.ready_sample is not None
+            assert readier.ready_wait_s is not None
+            return readier.ready_sample, readier.ready_wait_s
+        if readier.timed_out:
+            break
+        if STOP_EVENT.is_set():
+            raise QuestSetupError("等待 Quest 数据时收到停止信号")
         time.sleep(0.05)
-
-    if STOP_EVENT.is_set():
-        raise QuestSetupError("等待 Quest 数据时收到停止信号")
-    raise QuestSetupError(
-        f"等待 {source_text} 6D pose 超时。请确认：\n"
-        "  1. Quest 与电脑在同一局域网，PC Service 正在运行；\n"
-        "  2. XRoboToolKit APK 已由 ADB 启动，并开启 Tracking 和 Send；\n"
-        "  3. 使用 controller 时手柄已唤醒；使用 hand 时手部追踪有效；\n"
-        "  4. 当前选中侧确实被追踪。"
-    )
+    raise QuestSetupError(readier.timeout_message())
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1909,6 +1999,84 @@ def handle_stop_signal(signum: int, _frame: Any) -> None:
         watchdog.start()
 
 
+class CaptureReadiness:
+    """Non-blocking readiness monitoring for the sources started with the loop.
+
+    All sources are started before the capture loop and never waited for. This
+    object is polled from that loop (10 Hz): a camera that never delivers frames
+    only removes itself, and a missing headset only costs one warning.
+    """
+
+    def __init__(
+        self,
+        quest: QuestReadiness | None = None,
+        cameras: CameraReadiness | None = None,
+        camera_by_id: dict[str, Any] | None = None,
+        camera_errors: dict[str, str] | None = None,
+    ) -> None:
+        self.quest = quest
+        self.cameras = cameras
+        self.camera_by_id = camera_by_id or {}
+        self.camera_errors = camera_errors if camera_errors is not None else {}
+        self._quest_warned = False
+        self._failed_seen: set[str] = set()
+        self._cameras_reported = False
+
+    @property
+    def idle(self) -> bool:
+        return (
+            (self.quest is None or not self.quest.pending)
+            and (self.cameras is None or not self.cameras.pending)
+        )
+
+    def poll(self) -> None:
+        if self.quest is not None and self.quest.pending:
+            if self.quest.poll():
+                log(
+                    f"[INFO] Quest 数据链路已确认：连续 {self.quest.consecutive} 帧"
+                    f"有效 {self.quest.source_text} pose，"
+                    f"等待 {self.quest.ready_wait_s:.1f} 秒"
+                )
+            elif self.quest.timed_out and not self._quest_warned:
+                self._quest_warned = True
+                warn(
+                    "Quest 在超时前没有给出有效 pose；本次继续采集手套与相机，"
+                    "后到的 Quest 样本仍会写入 quest 组（时间域未知，不做对齐）"
+                )
+                warn(self.quest.timeout_message())
+        if self.cameras is None:
+            return
+        for camera_id in self.cameras.poll():
+            log(
+                f"[INFO] PXCap {camera_id} 摄像头已就绪，"
+                f"等待 {self.cameras.ready_at[camera_id]:.1f} 秒"
+            )
+        for camera_id, reason in self.cameras.failed.items():
+            if camera_id in self._failed_seen:
+                continue
+            self._failed_seen.add(camera_id)
+            self.camera_errors[camera_id] = reason
+            error(reason)
+            camera = self.camera_by_id.get(camera_id)
+            if camera is not None:
+                # 停掉这一路：让它继续占着 USB 带宽只会拖累另一路
+                call_with_timeout(
+                    f"停止 PXCap {camera_id} 摄像头",
+                    camera.stop,
+                    6.0,
+                )
+        if not self.cameras.pending and not self._cameras_reported:
+            self._cameras_reported = True
+            ready_ids = ", ".join(sorted(self.cameras.ready_at)) or "无"
+            if self.cameras.failed:
+                log(
+                    f"[INFO] 相机就绪检测结束：就绪 {ready_ids}，"
+                    f"失败 {', '.join(sorted(self.cameras.failed))}"
+                )
+            else:
+                log(f"[INFO] 相机就绪检测结束：{ready_ids}")
+
+
 def pump_and_record(
     recorder: Hdf5Recorder,
     hand_collector: HandCollector,
@@ -1918,6 +2086,7 @@ def pump_and_record(
     cameras: Sequence[FfmpegCamera] = (),
     final: bool = False,
     view: Any | None = None,
+    readiness: CaptureReadiness | None = None,
 ) -> None:
     """Move both queues into the HDF5, each on its own row axis.
 
@@ -1925,12 +2094,19 @@ def pump_and_record(
     returns, so the glove can be stopped before the tail is drained. ``final``
     runs after ``stop_collection()`` and keeps going until the queues are empty
     (1 s safety net), which is what keeps the last frames on disk.
+
+    ``readiness`` is polled on the same tick as the data, so a source that is
+    still coming up never blocks the rows already flowing.
     """
     last_progress = time.monotonic()
+    next_readiness = time.monotonic()
     stop_drain_deadline: float | None = None
     while True:
         if deadline is not None and time.monotonic() >= deadline:
             STOP_EVENT.set()
+        if readiness is not None and time.monotonic() >= next_readiness:
+            readiness.poll()
+            next_readiness = time.monotonic() + 0.1
         if STOP_EVENT.is_set():
             if not final:
                 break
@@ -2050,10 +2226,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     reader: XrtReader | None = None
     poller: QuestPoller | None = None
     quest_setup: Any = None
-    quest_ready_sample: TimedSample | None = None
-    quest_ready_wait_s: float | None = None
+    quest_setup_error: str | None = None
+    quest_tracker: QuestReadiness | None = None
+    camera_tracker: CameraReadiness | None = None
     cameras: list[FfmpegCamera] = []
-    camera_ready_wait_s: float | None = None
+    started_cameras: list[FfmpegCamera] = []
     camera_devices: dict[str, str] = {}
     camera_videos: dict[str, Any] = {}
     camera_errors: dict[str, str] = {}
@@ -2062,7 +2239,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     live_view: Any | None = None
     recorder_entered = False
     poller_started = False
-    output_dir_created = False
     exit_code = 0
     startup_error: Exception | None = None
     session_started_at = datetime.now().astimezone()
@@ -2078,37 +2254,54 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     try:
         resolved_hand_port = resolve_hand_port(args.hand_port)
+
+        # 三条链路各自启动、互不等待。这里的先后只按「前置准备最慢」排，不是依赖：
+        # Quest 的 ADB 安装最慢且不涉及任何 pose 等待，所以放最前面；相机节点
+        # 解析是配置检查（节点不存在属于用错参数，不是运行期掉线），仍然硬失败；
+        # 手套是唯一必需源，它的连接与启动失败时还没有 data.h5，按启动失败收场。
         if args.no_quest:
             warn(
                 "已禁用 Quest（--no-quest）：只采集手套与相机，"
                 "quest 组全部按缺失写入（NaN/False）"
             )
         else:
-            maybe_start_pc_service(args)
-            if not args.skip_adb:
-                quest_setup = prepare_quest(args, keep_usb_adb=True)
+            try:
+                maybe_start_pc_service(args)
+                if not args.skip_adb:
+                    quest_setup = prepare_quest(args, keep_usb_adb=True)
+                    log(
+                        f"[INFO] Quest ADB 已就绪：{quest_setup.serial} "
+                        f"({'无线' if quest_setup.wireless else 'USB'})"
+                    )
+                else:
+                    warn(
+                        "已跳过 ADB：必须自行确认 XRoboToolKit APK 已经启动。"
+                        "程序不会等 Quest：就绪检测在采集循环里做，超时只告警。"
+                    )
+                xrt = import_sdk()
+                reader = XrtReader(xrt)
+                poller = QuestPoller(reader, quest_stream, args.quest_rate)
+                poller.start()
+                poller_started = True
+                quest_tracker = QuestReadiness(
+                    quest_stream,
+                    args.pose_source,
+                    args.pose_side,
+                    args.quest_start_timeout,
+                    args.quest_ready_samples,
+                )
                 log(
-                    f"[INFO] Quest ADB 已就绪：{quest_setup.serial} "
-                    f"({'无线' if quest_setup.wireless else 'USB'})"
+                    "[INFO] Quest 轮询已启动；就绪检测不阻塞采集"
+                    f"（需连续 {args.quest_ready_samples} 帧有效 pose，"
+                    f"超过 {args.quest_start_timeout:g} 秒只告警）"
                 )
-            else:
-                warn(
-                    "已跳过 ADB：必须自行确认 XRoboToolKit APK 已经启动。"
-                    "程序仍会等待有效 Quest 数据，收到前不会启动 PXCap 采集。"
-                )
-
-            xrt = import_sdk()
-            reader = XrtReader(xrt)
-            poller = QuestPoller(reader, quest_stream, args.quest_rate)
-            poller.start()
-            poller_started = True
-            quest_ready_sample, quest_ready_wait_s = wait_for_quest_ready(
-                quest_stream,
-                args.pose_source,
-                args.pose_side,
-                args.quest_start_timeout,
-                args.quest_ready_samples,
-            )
+            except (QuestSetupError, RuntimeError, OSError, ImportError) as exc:
+                quest_setup_error = str(exc)
+                # 只清掉没起来的 poller；已经在跑的线程要留给 finally 收，
+                # 否则它会一直持有 SDK 调用。
+                if not poller_started:
+                    poller = None
+                warn(f"Quest 未就绪，本次只采手套与相机：{exc}")
 
         if camera_slots:
             ffmpeg = find_ffmpeg()
@@ -2131,8 +2324,34 @@ def main(argv: Sequence[str] | None = None) -> int:
                     for slot in camera_slots
                 )
             )
-            create_output_dir(output_dir)
-            output_dir_created = True
+
+        hand_collector = HandCollector(
+            resolved_hand_port,
+            args.hand_rate,
+            not args.omit_distribution,
+        )
+        hand_collector.connect()
+        # 先出数再建文件：data.h5 一旦存在就说明手套确实在跑，不存在
+        # 「启动失败但留下空文件」的中间态。
+        hand_collector.start()
+
+        create_output_dir(output_dir)
+
+        recorder = Hdf5Recorder(
+            output_dir,
+            args.pose_source,
+            args.pose_side,
+            args.cap_side,
+            camera_ids,
+            not args.omit_distribution,
+        )
+        recorder.__enter__()
+        recorder_entered = True
+        global ACTIVE_RECORDER
+        ACTIVE_RECORDER = recorder
+        log(f"[INFO] 数据写入：{output_dir}")
+
+        if camera_slots:
             camera_dir = output_dir / "cameras"
             camera_dir.mkdir(parents=True, exist_ok=True)
             cameras = [
@@ -2155,45 +2374,34 @@ def main(argv: Sequence[str] | None = None) -> int:
                 for slot, camera_id in zip(camera_slots, camera_ids)
             ]
             for camera in cameras:
-                camera.open()
-            for camera in cameras:
-                camera.start()
-            camera_ready_wait_s = wait_for_cameras_ready(
-                cameras,
-                args.camera_start_timeout,
-                args.camera_ready_samples,
-                STOP_EVENT,
-            )
-
-        hand_collector = HandCollector(
-            resolved_hand_port,
-            args.hand_rate,
-            not args.omit_distribution,
-        )
-        hand_collector.connect()
-
-        if not output_dir_created:
-            create_output_dir(output_dir)
-            output_dir_created = True
-
-        recorder = Hdf5Recorder(
-            output_dir,
-            args.pose_source,
-            args.pose_side,
-            args.cap_side,
-            camera_ids,
-            not args.omit_distribution,
-        )
-        recorder.__enter__()
-        recorder_entered = True
-        global ACTIVE_RECORDER
-        ACTIVE_RECORDER = recorder
-        log(f"[INFO] 数据写入：{output_dir}")
+                try:
+                    camera.open()
+                    camera.start()
+                    started_cameras.append(camera)
+                except Exception as exc:  # 单路失败不拖累另外两路
+                    camera_errors[camera.camera_id] = str(exc)
+                    error(
+                        f"PXCap {camera.camera_id} 摄像头启动失败，"
+                        f"本次不录这一路：{exc}"
+                    )
+            if started_cameras:
+                camera_tracker = CameraReadiness(
+                    started_cameras,
+                    args.camera_start_timeout,
+                    args.camera_ready_samples,
+                )
+                log(
+                    "[INFO] 相机就绪检测不阻塞采集"
+                    f"（每路需连续 {args.camera_ready_samples} 帧，"
+                    f"超时 {args.camera_start_timeout:g} 秒只让这一路失败）"
+                )
 
         if args.view:
             try:
-                camera_ids = tuple(
-                    camera.camera_id for camera in cameras if camera.preview_fps > 0
+                preview_ids = tuple(
+                    camera.camera_id
+                    for camera in started_cameras
+                    if camera.preview_fps > 0
                 )
                 title = f"PXCap III 实时 · {output_dir.name}"
                 from live_view import default_view_mode
@@ -2208,9 +2416,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                         CAP_SLOTS,
                         fps=args.view_video_fps,
                         title=title,
-                        camera_ids=camera_ids,
+                        camera_ids=preview_ids,
                     )
-                    live_view.attach_cameras(cameras)
+                    live_view.attach_cameras(started_cameras)
                     log(f"[INFO] 实时视图（浏览器版）：{live_view.url}")
                 else:
                     from live_view import LiveView
@@ -2219,9 +2427,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                         CAP_SLOTS,
                         fps=args.view_fps,
                         title=title,
-                        camera_ids=camera_ids,
+                        camera_ids=preview_ids,
                     )
-                    live_view.attach_cameras(cameras)
+                    live_view.attach_cameras(started_cameras)
                     log(
                         "[INFO] 实时视图已在独立进程打开"
                         "（关窗或按 q 只关视图，录制继续）"
@@ -2230,12 +2438,17 @@ def main(argv: Sequence[str] | None = None) -> int:
                 live_view = None
                 warn(f"实时视图打不开：{exc}；采集继续，可以用 --html 事后回放")
 
+        readiness = CaptureReadiness(
+            quest_tracker,
+            camera_tracker,
+            {camera.camera_id: camera for camera in started_cameras},
+            camera_errors,
+        )
         started_monotonic_ns = time.monotonic_ns()
-        hand_collector.start()
         deadline = (
             time.monotonic() + args.duration if args.duration > 0.0 else None
         )
-        log("开始同步采集，按 Ctrl+C 停止")
+        log("开始采集：手套/相机/Quest 各自启动、互不等待，按 Ctrl+C 停止")
         while not STOP_EVENT.is_set():
             pump_and_record(
                 recorder,
@@ -2243,8 +2456,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 quest_stream,
                 started_monotonic_ns,
                 deadline,
-                cameras,
+                started_cameras,
                 view=live_view,
+                readiness=readiness,
             )
 
     except (QuestSetupError, RuntimeError, OSError, ImportError) as exc:
@@ -2287,9 +2501,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                     )
                 exit_code = 2
 
-        # Stop the glove first, then the cameras: ffmpeg only needs SIGINT after
-        # no more frames will be paired against it.
-        for camera in cameras:
+        # 三路各自收尾，互不依赖顺序：每路都有自己的超时，任何一路卡住
+        # 都只影响它自己。相机必须在这里收掉，后面 probe() 要读已写完的 mkv。
+        for camera in started_cameras:
             log(f"[INFO] 停止 PXCap {camera.camera_id} 摄像头 ...")
             call_with_timeout(
                 f"停止 PXCap {camera.camera_id} 摄像头",
@@ -2316,11 +2530,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             and recorder_entered
             and hand_collector is not None
         ):
-            for camera in cameras:
+            for camera in started_cameras:
                 try:
                     video = camera.probe()
                 except RuntimeError as exc:
-                    camera_errors[camera.camera_id] = str(exc)
+                    # 就绪检测里已经判死的相机保留更具体的原因，别被
+                    # "未生成视频文件" 覆盖掉。
+                    camera_errors.setdefault(camera.camera_id, str(exc))
                     error(str(exc))
                     if startup_error is None:
                         startup_error = exc
@@ -2333,7 +2549,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                         monotonic_ns=video.timestamps_monotonic_ns,
                     )
                 except RuntimeError as exc:
-                    camera_errors[camera.camera_id] = str(exc)
+                    camera_errors.setdefault(camera.camera_id, str(exc))
                     error(str(exc))
                     if startup_error is None:
                         startup_error = exc
@@ -2380,8 +2596,22 @@ def main(argv: Sequence[str] | None = None) -> int:
                 exit_code = 2
 
             actual_hand_rate = recorder.capture_rate_hz
+            # 三路是各自启动的，起止时刻必然不同；manifest 记下各自的实际窗口，
+            # 让人一眼看出谁先开始、谁先结束，而不是靠日志里的时间戳去倒推。
+            hand_window = recorder.cap_window_unix_ns()
+            hand_mono_window = recorder.cap_window_monotonic_ns()
+            quest_sdk_window = recorder.quest_window_sdk_ns()
+            camera_ready_at = (
+                camera_tracker.ready_at if camera_tracker is not None else {}
+            )
+            camera_failed = (
+                sorted(camera_tracker.failed) if camera_tracker is not None else []
+            )
+            quest_ready = quest_tracker is not None and quest_tracker.ready
+            quest_ready_wait = (
+                quest_tracker.ready_wait_s if quest_tracker is not None else None
+            )
             camera_metadata: dict[str, Any] = {}
-            camera_by_id = {item.camera_id: item for item in cameras}
             for camera_id in camera_ids:
                 entry: dict[str, Any] = {
                     "device": camera_devices.get(slot_by_camera[camera_id]),
@@ -2392,6 +2622,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "requested_fps": args.camera_fps,
                     "codec": args.video_codec,
                     "error": camera_errors.get(camera_id),
+                    "ready_at_s": camera_ready_at.get(camera_id),
                 }
                 video_entry = camera_videos.get(camera_id)
                 if isinstance(video_entry, tuple):
@@ -2443,9 +2674,22 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "callback_mean_ms": hand_collector.callback_mean_ms,
                     "callback_max_ms": hand_collector.callback_max_ms,
                     "distribution_included": not args.omit_distribution,
+                    "first_timestamp_unix_ns": (
+                        hand_window[0] if hand_window else None
+                    ),
+                    "last_timestamp_unix_ns": (
+                        hand_window[1] if hand_window else None
+                    ),
+                    "first_timestamp_monotonic_ns": (
+                        hand_mono_window[0] if hand_mono_window else None
+                    ),
+                    "last_timestamp_monotonic_ns": (
+                        hand_mono_window[1] if hand_mono_window else None
+                    ),
                 },
                 "quest": {
-                    "enabled": not args.no_quest,
+                    "enabled": not args.no_quest and poller is not None,
+                    "setup_error": quest_setup_error,
                     "timestamp_source": "sdk_provided",
                     "timestamp_fields": [
                         "sdk_timestamp_ns",
@@ -2468,9 +2712,18 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "adb_wireless": (
                         quest_setup.wireless if quest_setup is not None else None
                     ),
-                    "ready_before_hand_start": quest_ready_sample is not None,
-                    "ready_wait_seconds": quest_ready_wait_s,
+                    "ready": quest_ready,
+                    "ready_wait_seconds": quest_ready_wait,
+                    "timed_out": bool(
+                        quest_tracker is not None and quest_tracker.timed_out
+                    ),
                     "required_consecutive_samples": args.quest_ready_samples,
+                    "first_sdk_timestamp_ns": (
+                        quest_sdk_window[0] if quest_sdk_window else None
+                    ),
+                    "last_sdk_timestamp_ns": (
+                        quest_sdk_window[1] if quest_sdk_window else None
+                    ),
                     "poll_rate_hz": args.quest_rate,
                     "polls": poller.samples if poller is not None else 0,
                     "poller_overruns": (
@@ -2491,10 +2744,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "cap_side": args.cap_side,
                     "slots": list(camera_slots),
                     "camera_ids": list(camera_ids),
-                    "ready_before_hand_start": (
-                        bool(camera_slots) and camera_ready_wait_s is not None
+                    "ready": sorted(camera_ready_at),
+                    "timed_out": camera_failed,
+                    "ready_wait_seconds": (
+                        max(camera_ready_at.values()) if camera_ready_at else None
                     ),
-                    "ready_wait_seconds": camera_ready_wait_s,
                     "per_camera": camera_metadata,
                 },
                 "verify": verify,

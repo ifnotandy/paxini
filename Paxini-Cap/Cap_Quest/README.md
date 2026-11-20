@@ -82,15 +82,23 @@ python3.10 capture/collect_cap.py --no-quest           # 没有头显时只采�
 python3.10 capture/collect_cap.py --camera-mode none   # 不录视频
 ```
 
-启动顺序（任一环节失败都在开始采集前退出，不生成伪造的 `data.h5`）：
+**三个来源各自启动，互不等待**（2026-11-20 起）。启动只有两类处置：
 
 ```text
-串口识别（USB 28e9:018a）
-→ ADB 启动 Quest APK
-→ 收到连续 3 次有效 Quest pose
-→ 每路相机连续 3 帧出图
-→ 启动手套连续采集
+手套       必需。连接/启动失败 → 直接按启动失败退出，不生成 data.h5
+相机       每路独立。起不来或超时只让这一路失败，记进 manifest.cameras
+Quest      可选。PC Service / ADB / 轮询起不来只告警，继续采手套与相机
 ```
+
+不再有「先等 Quest 连续 3 帧 pose，再起相机，再起手套」的串行等待：那会让一个没戴头显
+的会话白等 120 秒，而相机其实早就该开录了。现在三路都在采集循环开始前各自启动，
+**就绪检测搬进采集循环**（10 Hz 轮询），所以：
+
+- 相机仍需确认真的出帧（否则会录出 0 帧 mkv），判据是「连续 `--camera-ready-samples`
+  帧有进度」，超过 `--camera-start-timeout` 只停掉这一路并写 `camera_errors`；
+- Quest 超过 `--quest-start-timeout` 没有有效 pose 只打一条警告，后到的样本照样入表；
+- 三路的起止时刻必然不同，manifest 分别记 `hand.first/last_timestamp_unix_ns`、
+  `cameras.per_camera.<id>.first/last_timestamp_unix_ns`、`quest.first/last_sdk_timestamp_ns`。
 
 `--skip-adb` 可跳过 ADB，但必须自己先打开 XRoboToolkit 并开启 Tracking 和 Send。
 
@@ -220,9 +228,9 @@ HDF5 只存索引性质的时间戳。
 | `actual_rate_hz` | 按首末帧**单调钟**跨度算的实际频率 |
 | `duration_s` / `sample_span_s` | 墙钟耗时 / 手套首末帧跨度 |
 | `alignment` | 固定 `none (raw per-source timestamps only)` |
-| `hand` | 手别 `side`、Quest 请求手别 `pose_side_requested`、串口、SN、SDK/固件版本、故障、回调耗时、队列溢出 |
-| `quest` | enabled、rows、samples_dropped、轮询次数与超时 |
-| `cameras` | 每路设备、帧数、分辨率、实际 fps、时间窗、错误 |
+| `hand` | 手别 `side`、Quest 请求手别 `pose_side_requested`、串口、SN、SDK/固件版本、故障、回调耗时、队列溢出、**首末帧时刻** `first/last_timestamp_unix_ns` 与 `first/last_timestamp_monotonic_ns` |
+| `quest` | enabled、rows、samples_dropped、轮询次数与超时、**就绪** `ready` / `ready_wait_seconds` / `timed_out`、setup_error、**首末 SDK 时间戳** `first/last_sdk_timestamp_ns`（域未验证，只作增量参考） |
+| `cameras` | 每路设备、帧数、分辨率、实际 fps、时间窗、错误、`ready_at_s`；汇总 `ready` / `timed_out` / `ready_wait_seconds` |
 | `verify` | 行数自检（`row_mismatch` 必须为空） |
 | `env` | python / numpy / h5py / ffmpeg 版本 |
 

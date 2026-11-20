@@ -37,7 +37,7 @@ python3.10 capture/collect_cap.py --cap-side right --no-quest
 | `import pxhandsdk` 成功但没 `PxCap3` | 用成 3.12 了，换 `python3.10` |
 | 相机 0 fps / 5 fps | 先 `--list-devices` 看节点，再查分辨率/帧率是否被设备支持；5 fps 多半是带宽或 Hub 问题 |
 | 相机 20 秒不出图 | 先 `--camera-mode cam0` 排除带宽；再验分辨率是否被支持 |
-| 等 Quest 超时 120 s | 没有头显就加 `--no-quest` |
+| Quest 一直没 pose | 现在只打警告、不阻塞采集；没头显加 `--no-quest` 省掉 ADB 与轮询 |
 | 采完没有 `manifest.json` | 被强杀了。数据落在最后一个满批之前（每批已 flush），先 `--clear-write-flag` 再读；2026-11-13 那批老文件没这个保护，全废 |
 
 ## 3. 改 HDF5 字段

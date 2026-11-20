@@ -49,7 +49,12 @@ from collect_cap import (
     CAP_SLOT_POINTS,
     CAP_SLOTS,
     STOP_EVENT,
+    CameraReadiness,
+    CaptureReadiness,
     Hdf5Recorder,
+    QuestReadiness,
+    TimedSample,
+    TimedStream,
     apply_config,
     build_parser,
     load_config_file,
@@ -1056,7 +1061,6 @@ def test_startup_failure(tmp_root: Path) -> None:
         15.0,
         "copy",
         "/usr/bin/ffmpeg",
-        backend="linux",
     )
     camera_dir.mkdir(parents=True)
     camera.log_path.write_text(
@@ -1211,8 +1215,6 @@ def test_camera_preview(tmp_root: Path) -> None:
     The splitter runs on a raw pipe with no framing, so a bug here shows up as
     a frozen or garbage thumbnail, never as an exception.
     """
-    from unittest import mock
-
     from camera_ffmpeg import FfmpegCamera, extract_jpeg_frames
 
     frame_a = b"\xff\xd8AAA\xff\xd9"
@@ -1234,7 +1236,7 @@ def test_camera_preview(tmp_root: Path) -> None:
 
     quiet = FfmpegCamera(
         "cam0", "/dev/video0", tmp_root, 1280, 720, 30.0, "copy",
-        "/usr/bin/ffmpeg", backend="linux",
+        "/usr/bin/ffmpeg",
     )
     check(
         "实时预览/关掉时没有第二路输出",
@@ -1267,7 +1269,7 @@ def test_camera_preview(tmp_root: Path) -> None:
         "实时预览/预览不占默认值",
         FfmpegCamera(
             "cam0", "/dev/video0", tmp_root, 1280, 720, 30.0, "copy",
-            "/usr/bin/ffmpeg", backend="linux",
+            "/usr/bin/ffmpeg",
         ).preview_fps == 0.0,
     )
 
@@ -1550,6 +1552,109 @@ def run_case(name: str, function: Any, *args: Any) -> None:
         check(f"{name}（未预期异常）", False, f"{exc.__class__.__name__}: {exc}")
 
 
+class _FakeCamera:
+    """只实现就绪检测用到的四个方法，不碰 ffmpeg。"""
+
+    def __init__(self, camera_id: str, progress: int = 0, failure: str | None = None) -> None:
+        self.camera_id = camera_id
+        self.preview_fps = 0.0
+        self.failure = failure
+        self.progress = progress
+        self.stops = 0
+
+    def poll_health(self) -> None:
+        if self.failure is not None:
+            raise RuntimeError(self.failure)
+
+    def progress_signal(self) -> int:
+        return self.progress
+
+    def stop(self) -> None:
+        self.stops += 1
+
+
+def _quest_sample(sequence: int) -> TimedSample:
+    pose = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+    return TimedSample(
+        data={
+            "sequence": sequence,
+            "tracked": True,
+            "head": {"pose_xyzw": pose, "tracked": True, "available": True},
+            "controllers": {},
+            "hands": {},
+        }
+    )
+
+
+def test_source_readiness() -> None:
+    """就绪检测必须是非阻塞的，而且只能判死自己那一路。"""
+    good = _FakeCamera("cam0")
+    tracker = CameraReadiness([good], timeout_s=60.0, required_samples=3)
+    counts = []
+    for step in range(3):
+        good.progress += 1
+        counts.append(bool(tracker.poll()))
+    check(
+        "相机连续 N 帧进度才算就绪",
+        counts == [False, False, True] and tracker.pending == [],
+        f"{counts}",
+    )
+
+    dead = _FakeCamera("cam1")
+    tracker = CameraReadiness([dead], timeout_s=0.0, required_samples=3)
+    tracker.poll()
+    check(
+        "相机超时只判死这一路并给出原因",
+        "cam1" in tracker.failed and "超时" in tracker.failed["cam1"],
+        tracker.failed.get("cam1", "")[:40],
+    )
+
+    sick = _FakeCamera("cam2", failure="ffmpeg 退出码 1")
+    tracker = CameraReadiness([sick], timeout_s=60.0, required_samples=3)
+    tracker.poll()
+    check(
+        "相机进程已死时立刻判死，不必等超时",
+        tracker.failed.get("cam2") == "ffmpeg 退出码 1",
+        tracker.failed.get("cam2", ""),
+    )
+
+    stream = TimedStream(max_samples=8)
+    quest = QuestReadiness(stream, "head", "right", timeout_s=60.0, required_samples=3)
+    results = []
+    for sequence in range(3):
+        stream.push(_quest_sample(sequence))
+        results.append(quest.poll())
+    check(
+        "Quest 连续 N 帧有效 pose 才算就绪",
+        results == [False, False, True] and quest.ready_wait_s is not None,
+        f"{results}",
+    )
+
+    empty = QuestReadiness(
+        TimedStream(max_samples=8), "head", "right", timeout_s=0.0, required_samples=3
+    )
+    empty.poll()
+    check("Quest 一直没样本时只记超时，不抛异常", empty.timed_out and not empty.ready)
+
+    dead_cam = _FakeCamera("cam9")
+    errors: dict[str, str] = {}
+    monitor = CaptureReadiness(
+        QuestReadiness(
+            TimedStream(max_samples=8), "head", "right", timeout_s=0.0, required_samples=3
+        ),
+        CameraReadiness([dead_cam], timeout_s=0.0, required_samples=3),
+        {"cam9": dead_cam},
+        errors,
+    )
+    monitor.poll()
+    monitor.poll()
+    check(
+        "一路失败只记错误并停掉它自己，不抛异常",
+        "cam9" in errors and dead_cam.stops == 1 and monitor.idle,
+        f"stops={dead_cam.stops} idle={monitor.idle}",
+    )
+
+
 def main() -> int:
     tmp_root = Path(tempfile.mkdtemp(prefix="paxini-cap-selftest-"))
     try:
@@ -1566,6 +1671,7 @@ def main() -> int:
         run_case("配置", test_config_file, tmp_root)
         run_case("手别选择", test_pose_side_selection, tmp_root)
         run_case("启动失败工件", test_startup_failure, tmp_root)
+        run_case("三源就绪检测", test_source_readiness)
         if shutil.which("ffprobe"):
             run_case("相机命令", test_camera_command, tmp_root)
             run_case("相机预览", test_camera_preview, tmp_root)

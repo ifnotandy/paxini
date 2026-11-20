@@ -633,48 +633,109 @@ class FfmpegCamera:
         )
 
 
+class CameraReadiness:
+    """Non-blocking readiness tracker for a set of cameras.
+
+    Blocking on "wait until this camera produces frames" stalls every other
+    source of the session with it. The capture loop polls this object instead
+    and decides per camera: one dead camera must not stop the glove stream.
+    """
+
+    def __init__(
+        self,
+        cameras: Sequence[FfmpegCamera],
+        timeout_s: float,
+        required_samples: int,
+    ) -> None:
+        self.cameras = list(cameras)
+        self.timeout_s = float(timeout_s)
+        self.required_samples = max(1, int(required_samples))
+        self.started_monotonic = time.monotonic()
+        self.deadline = self.started_monotonic + self.timeout_s
+        self._last_progress = {camera.camera_id: 0 for camera in self.cameras}
+        self._counts = {camera.camera_id: 0 for camera in self.cameras}
+        #: camera_id -> seconds since the tracker was created
+        self.ready_at: dict[str, float] = {}
+        #: camera_id -> reason it will never become ready
+        self.failed: dict[str, str] = {}
+
+    @property
+    def pending(self) -> list[str]:
+        return [
+            camera.camera_id
+            for camera in self.cameras
+            if camera.camera_id not in self.ready_at
+            and camera.camera_id not in self.failed
+        ]
+
+    def pending_text(self) -> str:
+        return "，".join(
+            f"{camera_id}={self._last_progress[camera_id]}"
+            for camera_id in self.pending
+        )
+
+    def poll(self) -> list[str]:
+        """Advance once; return the camera ids that became ready in this call."""
+        now = time.monotonic()
+        newly_ready: list[str] = []
+        for camera in self.cameras:
+            camera_id = camera.camera_id
+            if camera_id in self.ready_at or camera_id in self.failed:
+                continue
+            try:
+                camera.poll_health()
+            except RuntimeError as exc:
+                self.failed[camera_id] = str(exc)
+                continue
+            progress = camera.progress_signal()
+            if progress > self._last_progress[camera_id]:
+                self._last_progress[camera_id] = progress
+                self._counts[camera_id] += 1
+            if self._counts[camera_id] >= self.required_samples:
+                self.ready_at[camera_id] = now - self.started_monotonic
+                newly_ready.append(camera_id)
+        if now >= self.deadline:
+            for camera_id in self.pending:
+                self.failed[camera_id] = (
+                    f"等待 PXCap {camera_id} 摄像头画面超时"
+                    f"（{self.timeout_s:g} 秒内没有连续 {self.required_samples} 帧，"
+                    f"进度 {self._last_progress[camera_id]}）。"
+                    "请检查 --list-devices 的节点、--camera-width/--camera-height "
+                    "是否被设备支持，以及两路 720p30 是否挤在同一个 USB Hub 上"
+                    "（约 20 MB/s，带宽不够会掉帧或起不来）"
+                )
+        return newly_ready
+
+
 def wait_for_cameras_ready(
     cameras: Sequence[FfmpegCamera],
     timeout_s: float,
     required_samples: int,
     stop_event=None,
 ) -> float:
-    """Wait until every camera keeps reporting new frames in its progress file."""
-    started = time.monotonic()
-    deadline = started + timeout_s
-    counts = {camera.camera_id: 0 for camera in cameras}
-    last_progress = {camera.camera_id: 0 for camera in cameras}
+    """Blocking wrapper around :class:`CameraReadiness`.
+
+    Kept for callers that cannot poll (standalone scripts). ``collect_cap.py``
+    no longer uses it: the capture loop polls the tracker so a slow camera does
+    not delay the other two sources.
+    """
+    readier = CameraReadiness(cameras, timeout_s, required_samples)
     camera_text = "/".join(camera.camera_id for camera in cameras)
     log(
         f"[INFO] 等待 PXCap {camera_text} 摄像头画面；"
         f"每路需要连续 {required_samples} 帧，超时 {timeout_s:g} 秒"
     )
 
-    while time.monotonic() < deadline:
+    while True:
+        readier.poll()
+        if readier.failed:
+            raise RuntimeError(next(iter(readier.failed.values())))
+        if not readier.pending:
+            break
         if stop_event is not None and stop_event.is_set():
             raise RuntimeError("等待 PXCap 摄像头时收到停止信号")
-        for camera in cameras:
-            camera.poll_health()
-            progress = camera.progress_signal()
-            if progress > last_progress[camera.camera_id]:
-                last_progress[camera.camera_id] = progress
-                counts[camera.camera_id] += 1
-        if all(count >= required_samples for count in counts.values()):
-            elapsed = time.monotonic() - started
-            log(
-                f"[INFO] PXCap {camera_text} 摄像头已就绪，"
-                f"等待 {elapsed:.1f} 秒"
-            )
-            return elapsed
         time.sleep(PROGRESS_POLL_S)
 
-    details = "，".join(
-        f"{camera_id}={progress}"
-        for camera_id, progress in last_progress.items()
-    )
-    raise RuntimeError(
-        f"等待 PXCap {camera_text} 摄像头画面超时（已出帧：{details}）。"
-        "请检查 --list-devices 的节点、--camera-width/--camera-height 是否被"
-        "设备支持，以及两路 720p30 是否挤在同一个 USB Hub 上（约 20 MB/s，"
-        "带宽不够会掉帧或起不来）"
-    )
+    elapsed = max(readier.ready_at.values(), default=0.0)
+    log(f"[INFO] PXCap {camera_text} 摄像头已就绪，等待 {elapsed:.1f} 秒")
+    return elapsed

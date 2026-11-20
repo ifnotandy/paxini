@@ -16,7 +16,7 @@ AI 在新会话里最容易犯的四个错，各有一份对应：
 | [`constraints.md`](constraints.md) | 不知道哪些"优化"会破坏下游，好心办坏事 |
 | [`playbook.md`](playbook.md) | 知道要改什么，但步骤顺序错，跑一半卡住 |
 | [`pitfalls.md`](pitfalls.md) | 重复踩已经踩过的坑，浪费一整轮 |
-| [`known-issues.md`](known-issues.md) | 在已经错了的代码/文档上继续盖东西（当前 4 条，无 P0） |
+| [`known-issues.md`](known-issues.md) | 在已经错了的代码/文档上继续盖东西（当前 1 条 P2，无 P0/P1） |
 
 ## 项目 30 秒
 
