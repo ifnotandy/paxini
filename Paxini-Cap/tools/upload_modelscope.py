@@ -1,22 +1,26 @@
-"""Package finished recordings and upload them to a ModelScope dataset repo.
+"""Push finished recordings to a ModelScope dataset repo.
 
 The recording directory stays the single source of truth: this script only reads
-``Recordings/data_*``, writes zips into a staging directory, and pushes those
-zips. It never edits or moves the capture output.
+``Recordings/data_*``, mirrors them into a staging directory, and uploads from
+there. It never edits or moves the capture output.
 
 Design notes
 ------------
+* No packaging by default. Each ``data_*`` directory is hard-linked into
+  staging and uploaded as a plain tree, so a consumer can pull one file
+  (``data.h5``, one camera's mkv) instead of the whole session. ``--zip``
+  produces ``data_x.zip`` for people who prefer a single object.
 * Dry run is the default. ``--upload`` is required to touch the network, so a
   typo cannot publish half a session.
 * A recording is gated on the same evidence the recorder itself writes:
   ``verify.row_mismatch`` empty, glove rows present, every camera error null.
   A session that lost a camera still uploads, but says so loudly.
-* Zips are stored uncompressed: the payload is Matroska/MJPEG and HDF5, both
-  already compressed, so deflate buys ~2% for a lot of CPU.
-* ``SHA256SUMS.txt`` uses the ``sha256sum -c`` format so the download side can
-  verify with one command.
-* ``modelscope`` is imported lazily, so ``--dry-run`` works on a machine that
-  never installed it (the capture box, for instance).
+* Zips, when requested, are stored uncompressed: the payload is Matroska/MJPEG
+  and HDF5, both already compressed, so deflate buys ~2% for a lot of CPU.
+* ``SHA256SUMS.txt`` lists one entry per uploaded file in ``sha256sum -c``
+  format, so the download side can verify with one command.
+* ``modelscope`` is imported lazily, so a dry run works on a machine that never
+  installed it (the capture box, for instance).
 """
 
 from __future__ import annotations
@@ -198,8 +202,8 @@ def remote_sums(api: Any, repo_id: str, token: str) -> dict[str, str]:
     it just staged. Without this merge, uploading one session would shrink the
     manifest to the current batch and silently drop every earlier entry.
 
-    Covers both shapes on purpose: ``data_x.zip`` (older uploads) and
-    ``data_x/...`` (``--no-zip`` uploads).
+    Covers both shapes on purpose: ``data_x.zip`` (``--zip`` uploads) and
+    ``data_x/...`` (the default directory uploads).
     """
     try:
         items = api.get_dataset_files(repo_id, recursive=True, token=token)
@@ -262,8 +266,8 @@ def do_upload(
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "把 Recordings/data_* 打包成 zip 并上传到 ModelScope 数据集仓。"
-            "默认只演练，不联网。"
+            "把 Recordings/data_* 上传到 ModelScope 数据集仓。默认直接传目录树、"
+            "只演练不联网；--zip 才打包，--upload 才真传。"
         )
     )
     parser.add_argument(
@@ -297,18 +301,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--upload",
         action="store_true",
-        help="真的上传；不加这个只是演练（打包仍然会做）",
+        help="真的上传；不加这个只是演练",
     )
     parser.add_argument(
         "--rebuild",
         action="store_true",
-        help="已有的 zip 比目录旧也重新打包；默认直接复用",
+        help="已有的 zip 比目录旧也重新打包；只在 --zip 模式下有意义",
     )
     parser.add_argument(
-        "--no-zip",
+        "--zip",
         action="store_true",
         help=(
-            "不打包，直接把 data_* 目录树传上去（staging 里用硬链接，不额外占空间）"
+            "打包成 <目录名>.zip 再传；默认不打包，直接把 data_* 目录树传上去"
         ),
     )
     parser.add_argument(
@@ -368,19 +372,7 @@ def main(argv: list[str] | None = None) -> int:
 
     local_entries: dict[str, str] = {}
     archives: list[Path] = []
-    if args.no_zip:
-        for recording, _facts in ready:
-            target = staging / recording.name
-            # 换模式重跑时，上一次留下的另一种形态必须清掉，否则两种都会传上去。
-            if target.exists():
-                shutil.rmtree(target)
-            stale_zip = staging / f"{recording.name}.zip"
-            if stale_zip.exists():
-                stale_zip.unlink()
-            count = link_tree(recording, target)
-            local_entries.update(tree_sums(recording, target))
-            log(f"  直接上传 {recording.name}/：{count} 个文件（硬链接，不占额外空间）")
-    else:
+    if args.zip:
         for recording, _facts in ready:
             stale_dir = staging / recording.name
             if stale_dir.exists():
@@ -392,6 +384,18 @@ def main(argv: list[str] | None = None) -> int:
                 log(f"  复用 {archive.name}（{archive.stat().st_size / 2**20:.1f} MB）")
             archives.append(archive)
         local_entries = local_sums(archives)
+    else:
+        for recording, _facts in ready:
+            target = staging / recording.name
+            # 换模式重跑时，上一次留下的另一种形态必须清掉，否则两种都会传上去。
+            if target.exists():
+                shutil.rmtree(target)
+            stale_zip = staging / f"{recording.name}.zip"
+            if stale_zip.exists():
+                stale_zip.unlink()
+            count = link_tree(recording, target)
+            local_entries.update(tree_sums(recording, target))
+            log(f"  直接上传 {recording.name}/：{count} 个文件（硬链接，不占额外空间）")
 
     write_sums(staging, local_entries)
 

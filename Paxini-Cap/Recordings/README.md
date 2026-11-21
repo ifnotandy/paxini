@@ -62,29 +62,31 @@
 
 ## 上传（`tools/upload_modelscope.py`）
 
-打包与上传都走脚本，不要手工拖网页：
+上传走脚本，不要手工拖网页：
 
 ```bash
 cd Paxini-Cap
-python tools/upload_modelscope.py                        # 演练：只打包 + 打印门禁，不联网
-python tools/upload_modelscope.py --only data_20261118_1  # 只处理一份
-python tools/upload_modelscope.py --no-zip --upload       # 不打包，直接传目录树
-python tools/upload_modelscope.py --upload                # 真传
+python tools/upload_modelscope.py                         # 演练：只列门禁，不联网
+python tools/upload_modelscope.py --only data_20261118_1   # 只处理一份
+python tools/upload_modelscope.py --upload                 # 真传
+python tools/upload_modelscope.py --zip --upload            # 需要打包时才加 --zip
 ```
 
-- **默认不联网**，`--upload` 才动网；确认无误再加。
-- **`--no-zip` 直接传目录**：staging 里用硬链接镜像（不额外占盘），远端就是
+- **默认不打包**：staging 里用硬链接镜像（不额外占盘），远端就是
   `data_x/data.h5`、`data_x/cameras/*.mkv` 这几个文件，下载时可以只取需要的那个。
-  已上传的四份是 zip，两种形态可以共存，`SHA256SUMS.txt` 两种条目都记。
+- **默认不联网**，`--upload` 才动网；确认无误再加。
+- `--zip` 改成每份一个 `<目录名>.zip`（内部根节点是目录名本身），适合想一次拿全的人。
+  zip 用 STORED 不压缩——里面是 mkv 和 h5，deflate 只省 2% 却要全程 CPU。
+  已有 zip 比目录新就复用，`--rebuild` 强制重打。
+- 已上传的四份老数据是 zip，新采集默认传目录，两种形态共存，
+  `SHA256SUMS.txt` 两种条目都记。
 - 门禁读的是 `manifest.json`：`verify.row_mismatch` 必须为空、手套行数 > 0、
   实际频率在 50~200 Hz、每路相机 `error` 为空且帧数 > 0、`data.h5` 与
   `cameras/<id>.mkv` 都在。不合格默认跳过并打印原因，`--allow-broken` 才强传。
-- 产物是 `<recordings>/.upload_staging/`：每份一个 `<目录名>.zip`（内部根节点是
-  目录名本身）+ 一份 `SHA256SUMS.txt`（`sha256sum -c` 格式）。zip 用 STORED
-  不压缩——里面是 mkv 和 h5，deflate 只省 2% 却要全程 CPU。
-- `SHA256SUMS.txt` 描述的是**整个仓库**：`--upload` 时先读远端已有的 zip 列表，
-  和本次打包的合并后再写，所以分几次上传也不会把早先的条目冲掉。
-- 已有的 zip 只要比目录新就复用，`--rebuild` 强制重打。
+- 产物在 `<recordings>/.upload_staging/`（目录树或 zip）+ 一份 `SHA256SUMS.txt`
+  （逐文件 `sha256sum -c` 格式）。
+- `SHA256SUMS.txt` 描述的是**整个仓库**：`--upload` 时先读远端已有文件，
+  和本批合并后再写，所以分几次上传也不会把早先的条目冲掉。
 - 令牌走 `--token` 或环境变量 `MODELSCOPE_API_TOKEN`
   （<https://modelscope.cn/my/myaccesstoken>），**两者都没有会直接报错退出**。
   `~/.modelscope/credentials` 里只有 cookies / session / 截断的 `git_token`，
