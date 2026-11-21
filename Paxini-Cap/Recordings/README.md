@@ -68,10 +68,14 @@
 cd Paxini-Cap
 python tools/upload_modelscope.py                        # 演练：只打包 + 打印门禁，不联网
 python tools/upload_modelscope.py --only data_20261118_1  # 只处理一份
+python tools/upload_modelscope.py --no-zip --upload       # 不打包，直接传目录树
 python tools/upload_modelscope.py --upload                # 真传
 ```
 
 - **默认不联网**，`--upload` 才动网；确认无误再加。
+- **`--no-zip` 直接传目录**：staging 里用硬链接镜像（不额外占盘），远端就是
+  `data_x/data.h5`、`data_x/cameras/*.mkv` 这几个文件，下载时可以只取需要的那个。
+  已上传的四份是 zip，两种形态可以共存，`SHA256SUMS.txt` 两种条目都记。
 - 门禁读的是 `manifest.json`：`verify.row_mismatch` 必须为空、手套行数 > 0、
   实际频率在 50~200 Hz、每路相机 `error` 为空且帧数 > 0、`data.h5` 与
   `cameras/<id>.mkv` 都在。不合格默认跳过并打印原因，`--allow-broken` 才强传。

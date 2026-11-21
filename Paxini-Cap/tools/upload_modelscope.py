@@ -25,6 +25,7 @@ import argparse
 import hashlib
 import json
 import os
+import shutil
 import sys
 import zipfile
 from datetime import datetime
@@ -146,6 +147,38 @@ def build_zip(recording: Path, archive: Path) -> None:
     log(f"  打包 {archive.name}：{count} 个文件，{archive.stat().st_size / 2**20:.1f} MB")
 
 
+def link_tree(recording: Path, target: Path) -> int:
+    """Mirror one recording into staging using hard links (copy as a fallback).
+
+    Hard links keep staging free of an 80 MB duplicate per session while still
+    giving ``upload_folder`` a plain directory tree to walk.
+    """
+    target.mkdir(parents=True, exist_ok=True)
+    count = 0
+    for path in sorted(recording.rglob("*")):
+        if not path.is_file() or path.suffix in (".log", ".progress"):
+            continue
+        dest = target / path.relative_to(recording)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        if dest.exists():
+            dest.unlink()
+        try:
+            os.link(path, dest)
+        except OSError:
+            shutil.copy2(path, dest)
+        count += 1
+    return count
+
+
+def tree_sums(recording: Path, target: Path) -> dict[str, str]:
+    """sha256 of every staged file, keyed by its repo-relative path."""
+    return {
+        f"{recording.name}/{path.relative_to(target).as_posix()}": sha256_file(path)
+        for path in sorted(target.rglob("*"))
+        if path.is_file()
+    }
+
+
 def write_sums(staging: Path, entries: dict[str, str]) -> Path:
     path = staging / SUMS_NAME
     lines = [f"{digest}  {name}" for name, digest in sorted(entries.items())]
@@ -158,23 +191,27 @@ def local_sums(archives: list[Path]) -> dict[str, str]:
     return {archive.name: sha256_file(archive) for archive in archives}
 
 
-def remote_zip_sums(api: Any, repo_id: str, token: str) -> dict[str, str]:
-    """Best-effort sha256 of the zips already in the repo, as ``{name: sha}``.
+def remote_sums(api: Any, repo_id: str, token: str) -> dict[str, str]:
+    """Best-effort sha256 of what the repo already holds, as ``{path: sha}``.
 
-    ``SHA256SUMS.txt`` describes the whole repository, but a run only knows the
-    zips it just built. Without this merge, uploading one session would shrink
-    the manifest to a single line and silently drop the other entries.
+    ``SHA256SUMS.txt`` describes the whole repository, but a run only knows what
+    it just staged. Without this merge, uploading one session would shrink the
+    manifest to the current batch and silently drop every earlier entry.
+
+    Covers both shapes on purpose: ``data_x.zip`` (older uploads) and
+    ``data_x/...`` (``--no-zip`` uploads).
     """
     try:
-        items = api.get_dataset_files(repo_id, recursive=False, token=token)
+        items = api.get_dataset_files(repo_id, recursive=True, token=token)
     except Exception as exc:  # noqa: BLE001 - the merge is a nice-to-have
-        warn(f"读不到远端文件列表（{exc}），本次 {SUMS_NAME} 只含本次打包的 zip")
+        warn(f"读不到远端文件列表（{exc}），本次 {SUMS_NAME} 只含本批文件")
         return {}
+    skip = {SUMS_NAME, "README.md", ".gitattributes"}
     sums: dict[str, str] = {}
     for item in items:
         name = item.get("Path") if isinstance(item, dict) else getattr(item, "Path", None)
         digest = item.get("Sha256") if isinstance(item, dict) else getattr(item, "Sha256", None)
-        if not name or not digest or not name.endswith(".zip"):
+        if not name or not digest or str(name) in skip or str(name).endswith("/"):
             continue
         sums[str(name)] = str(digest)
     return sums
@@ -185,7 +222,7 @@ def do_upload(
     repo_id: str,
     token: str,
     commit_message: str,
-    archives: list[Path],
+    local_entries: dict[str, str],
 ) -> None:
     try:
         from modelscope.hub.api import HubApi
@@ -203,11 +240,11 @@ def do_upload(
     except Exception as exc:  # noqa: BLE001 - surface whatever the SDK said
         raise SystemExit(f"ModelScope 登录失败：{exc}") from exc
 
-    merged = remote_zip_sums(api, repo_id, token)
+    merged = remote_sums(api, repo_id, token)
     before = len(merged)
-    merged.update(local_sums(archives))
+    merged.update(local_entries)
     if before:
-        log(f"  远端已有 {before} 个 zip，合并进 {SUMS_NAME}")
+        log(f"  远端已有 {before} 个文件，合并进 {SUMS_NAME}")
     write_sums(staging, merged)
 
     log(f"[上传] {repo_id} ← {staging}")
@@ -268,6 +305,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="已有的 zip 比目录旧也重新打包；默认直接复用",
     )
     parser.add_argument(
+        "--no-zip",
+        action="store_true",
+        help=(
+            "不打包，直接把 data_* 目录树传上去（staging 里用硬链接，不额外占空间）"
+        ),
+    )
+    parser.add_argument(
         "--allow-broken",
         action="store_true",
         help="有阻塞问题的目录也上传（不建议）",
@@ -322,28 +366,49 @@ def main(argv: list[str] | None = None) -> int:
         error("没有可以上传的目录（有阻塞项时用 --allow-broken 强制）")
         return 2
 
+    local_entries: dict[str, str] = {}
     archives: list[Path] = []
-    for recording, _facts in ready:
-        archive = staging / f"{recording.name}.zip"
-        if args.rebuild or not zip_is_current(recording, archive):
-            build_zip(recording, archive)
-        else:
-            log(f"  复用 {archive.name}（{archive.stat().st_size / 2**20:.1f} MB）")
-        archives.append(archive)
+    if args.no_zip:
+        for recording, _facts in ready:
+            target = staging / recording.name
+            # 换模式重跑时，上一次留下的另一种形态必须清掉，否则两种都会传上去。
+            if target.exists():
+                shutil.rmtree(target)
+            stale_zip = staging / f"{recording.name}.zip"
+            if stale_zip.exists():
+                stale_zip.unlink()
+            count = link_tree(recording, target)
+            local_entries.update(tree_sums(recording, target))
+            log(f"  直接上传 {recording.name}/：{count} 个文件（硬链接，不占额外空间）")
+    else:
+        for recording, _facts in ready:
+            stale_dir = staging / recording.name
+            if stale_dir.exists():
+                shutil.rmtree(stale_dir)
+            archive = staging / f"{recording.name}.zip"
+            if args.rebuild or not zip_is_current(recording, archive):
+                build_zip(recording, archive)
+            else:
+                log(f"  复用 {archive.name}（{archive.stat().st_size / 2**20:.1f} MB）")
+            archives.append(archive)
+        local_entries = local_sums(archives)
 
-    write_sums(staging, local_sums(archives))
+    write_sums(staging, local_entries)
 
+    if archives:
+        staged = [archive.stem for archive in archives]
+    else:
+        staged = [recording.name for recording, _ in ready]
     commit_message = args.commit_message or (
-        "上传 " + ", ".join(archive.stem for archive in archives)
-        + f"（{datetime.now().strftime('%Y-%m-%d %H:%M')}）"
+        "上传 " + ", ".join(staged) + f"（{datetime.now().strftime('%Y-%m-%d %H:%M')}）"
     )
     if not args.upload:
         log("")
         log("[演练] 未联网。确认无误后加 --upload 真正上传。")
         visible = [
-            path.name
+            path.name + ("/" if path.is_dir() else "")
             for path in sorted(staging.iterdir())
-            if path.is_file() and not path.name.startswith(".")
+            if not path.name.startswith(".")
         ]
         log(f"[演练] 将上传：{', '.join(visible)}")
         return 0
@@ -355,8 +420,8 @@ def main(argv: list[str] | None = None) -> int:
             "在 https://modelscope.cn/my/myaccesstoken 获取（别写进仓库）。"
         )
         return 2
-    do_upload(staging, args.repo_id, token.strip(), commit_message, archives)
-    log(f"上传内容：{', '.join(archive.name for archive in archives)} + {SUMS_NAME}")
+    do_upload(staging, args.repo_id, token.strip(), commit_message, local_entries)
+    log(f"上传内容：{', '.join(staged)} + {SUMS_NAME}")
     if blocked:
         log(f"未上传（有阻塞）：{', '.join(blocked)}")
     return 0
