@@ -2,9 +2,10 @@
 """Look at one capture run: a Tk window by default, ``--html`` for a browser.
 
 Reads ``<capture>/data.h5`` and shows joint angles, resultant-force magnitude,
-distribution-force point counts, and the per-slot resultant force (x, y, z) as
-a plain numeric table, on one scrubbable time axis. Optional Quest 3 data is
-rendered in a separate panel with its own SDK time axis.
+distribution-force point counts, the per-slot resultant force (x, y, z) table,
+and a schematic hand scatter plot of the 10×119 distribution-force points, on
+one scrubbable time axis. Optional Quest 3 data is rendered in a separate panel
+with its own SDK time axis.
 
 Two output modes, same data model:
 
@@ -61,7 +62,25 @@ if str(_CAPTURE_DIR) not in sys.path:
 # Reuse the recorder's constants so the viewer cannot drift from the file
 # layout.  ``collect_cap`` only imports the SDK lazily, so this is safe on a
 # machine without the glove plugged in.
-from collect_cap import ANGLE_FIELDS, CAP_SLOTS
+from collect_cap import ANGLE_FIELDS, CAP_MAX_POINTS, CAP_SLOTS, CAP_SLOT_POINTS
+try:
+    # Local-only vendor point model; not committed (see .gitignore).
+    from sensor_layout import (
+        build_dist_flips,
+        build_dist_points,
+        build_dist_rotations,
+    )
+
+    DIST_LAYOUT_SOURCE = "studio"
+except ImportError:
+    # Public fallback: regular grids whose extents match the real models.
+    from sensor_layout_schematic import (
+        build_dist_flips,
+        build_dist_points,
+        build_dist_rotations,
+    )
+
+    DIST_LAYOUT_SOURCE = "schematic"
 from quest_view import (
     QUEST_ALIGNMENT_CHOICES,
     QUEST_ALIGNMENT_NOTE,
@@ -93,6 +112,9 @@ SLOT_LABELS = {
 
 DEFAULT_MAX_POINTS = 4000
 DEFAULT_DIST_FRAMES = 600
+# Fixed per-point colour scale.  The sensor's single-point force range is 25 N;
+# an adaptive percentile made weak contacts saturate too early.
+DIST_POINT_FORCE_MAX_N = 25.0
 
 
 # --------------------------------------------------------------------------
@@ -349,6 +371,8 @@ def build_slot_force(
     handle: h5py.File,
     index: np.ndarray,
     warnings: list[str],
+    *,
+    include_tangent: bool = True,
 ) -> dict[str, Any] | None:
     """Per-slot resultant force (x, y, z) as raw int16, base64 encoded.
 
@@ -368,12 +392,80 @@ def build_slot_force(
         return None
     counts = handle["cap/distribute_counts"][index].astype(np.int64)
     raw = np.ascontiguousarray(block.astype("<i2"))
+
+    dist: dict[str, Any] | None = None
+    dist_path = "cap/distribute_force"
+    if dist_path in handle:
+        # (F, 10, 119, 3) int16 in 0.1 N.  The magnitude is what the heatmap
+        # colours; keeping 0.01 N in uint16 is lossless enough for hover text
+        # and still small: 600 frames x 10 slots x 119 points = 1.4 MB raw.
+        raw_dist = handle[dist_path][index].astype(np.int16)
+        magnitude = np.linalg.norm(raw_dist.astype(np.float64), axis=-1) * 0.1
+        valid = (
+            np.arange(CAP_MAX_POINTS, dtype=np.int64)[None, :]
+            < counts[:, :, None]
+        )
+        magnitude = np.where(valid, magnitude, 0.0)
+        if not np.any(magnitude > 0.0):
+            warnings.append("分布力全为 0：散点图只会显示暗点")
+        scale_n = DIST_POINT_FORCE_MAX_N
+        quantized = np.clip(
+            np.rint(magnitude * 100.0), 0, np.iinfo(np.uint16).max
+        ).astype("<u2")
+
+        tangent_b64: str | None = None
+        tangent_scale_n = 0.0
+        if include_tangent:
+            # Fx/Fy are the sensor-plane (tangential) components.  They arrive
+            # as signed int8 in 0.1 N; keep them byte-for-byte in int8.
+            tangent = np.zeros((*raw_dist.shape[:-1], 2), dtype=np.int8)
+            tangent[..., 0] = np.clip(raw_dist[..., 0], -128, 127)
+            tangent[..., 1] = np.clip(raw_dist[..., 1], -128, 127)
+            tangent = np.where(valid[..., None], tangent, 0).astype(np.int8)
+            tangent_mag = np.linalg.norm(
+                tangent.astype(np.float64), axis=-1
+            ) * 0.1
+            tangent_nonzero = tangent_mag[tangent_mag > 0.0]
+            if tangent_nonzero.size:
+                tangent_scale_n = float(np.percentile(tangent_nonzero, 99))
+                if (
+                    not math.isfinite(tangent_scale_n)
+                    or tangent_scale_n <= 0.0
+                ):
+                    tangent_scale_n = float(tangent_nonzero.max())
+            tangent_b64 = base64.b64encode(
+                np.ascontiguousarray(tangent).tobytes()
+            ).decode("ascii")
+
+        dist = {
+            "shape": [len(CAP_SLOTS), CAP_MAX_POINTS],
+            "capacities": [int(CAP_SLOT_POINTS[slot]) for slot in CAP_SLOTS],
+            "scale_n": round(scale_n, 4),
+            "data": base64.b64encode(
+                np.ascontiguousarray(quantized).tobytes()
+            ).decode("ascii"),
+            # Static 2D positions for every slot's valid points.  The shapes
+            # come from the local PXCap Studio sensor models; the module
+            # arrangement is schematic (see sensor_layout.py).
+            "points": build_dist_points(),
+            "rotations": build_dist_rotations(),
+            "flips": build_dist_flips(),
+            "layout_source": DIST_LAYOUT_SOURCE,
+            "tangent": tangent_b64,
+            "tangent_scale_n": round(tangent_scale_n, 4),
+        }
+    else:
+        warnings.append(
+            "这次采集没有分布力数据（--omit-distribution），散点图不可用"
+        )
+
     return {
         "slots": len(CAP_SLOTS),
         "frames": int(index.size),
         "unit": "N",
         "counts": [[int(v) for v in row] for row in counts],
         "data": base64.b64encode(raw.tobytes()).decode("ascii"),
+        "dist": dist,
     }
 
 
@@ -385,6 +477,7 @@ def collect_payload(
     *,
     quest_alignment: str = "none",
     quest_clock_report: dict[str, Any] | None = None,
+    with_dist_arrows: bool = True,
 ) -> dict[str, Any]:
     h5_path = root / "data.h5"
     if not h5_path.is_file():
@@ -432,11 +525,19 @@ def collect_payload(
             )
 
         table_index = take_evenly(rows, dist_frames)
-        slot_force = build_slot_force(handle, table_index, warnings)
+        slot_force = build_slot_force(
+            handle, table_index, warnings, include_tangent=with_dist_arrows
+        )
         table_seconds = seconds[table_index] if slot_force is not None else []
 
         duration = float(np.nanmax(seconds)) if seconds.size else 0.0
         pose_meta = manifest.get("pose") or {}
+        hand_meta = manifest.get("hand")
+        hand_side = str(
+            (hand_meta.get("side") if isinstance(hand_meta, dict) else None)
+            or pose_meta.get("side")
+            or "right"
+        )
         cap_unix_first_ns = (
             int(handle["cap/timestamp_unix_ns"][0])
             if "cap/timestamp_unix_ns" in handle and rows
@@ -471,6 +572,7 @@ def collect_payload(
                 "name": root.name,
                 "path": str(root),
                 "format_version": manifest.get("format_version"),
+                "hand_side": hand_side,
                 "rows": rows,
                 "quest_rows": quest_rows,
                 "quest_shown": (
@@ -1292,6 +1394,46 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   #slotTable tr.total td {
     border-top: 1px solid var(--line); color: #f0c274; padding-top: 3px;
   }
+  /* 分布力空间散点图：点位形状来自 Studio 测点模型，贴片位置来自 PXCap III
+     参考图的 10 块贴片边界框；右侧放色标、当前帧读数与各槽位峰值。 */
+  #distCard { min-height: 920px; }
+  #distWrap {
+    display: flex; gap: 14px; flex: 1 1 auto; min-height: 820px;
+    justify-content: center;
+  }
+  #distPlot { flex: 0 1 640px; min-width: 0; }
+  #distSide {
+    flex: 0 0 250px; width: 250px; min-height: 0; padding-right: 4px;
+    display: flex; flex-direction: column; gap: 10px;
+    font-size: 10px; color: var(--muted); overflow: hidden;
+  }
+  #distCard h2 span {
+    font-size: 10px; padding-right: 6px; max-width: 120px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  #distLegend .bar {
+    height: 10px; border-radius: 3px;
+    background: linear-gradient(90deg,#101722,#1e4b7a,#2aa7a1,#f2c14e,#e4572e);
+  }
+  #distLegend .row { display: flex; justify-content: space-between; gap: 6px; margin-top: 3px; }
+  #distReadout { line-height: 1.55; overflow: auto; min-height: 0; }
+  #distReadout b { color: var(--text); font-weight: 500; }
+  #distSlots {
+    display: grid; grid-template-columns: minmax(0, 1fr) auto;
+    gap: 1px 8px; font-size: 9.5px; overflow: auto; min-height: 0;
+  }
+  #distSlots span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #distSlots b { color: #5d6879; font-weight: 500; text-align: right; font-variant-numeric: tabular-nums; }
+  #distArrowToggleWrap { cursor: pointer; }
+  #distArrowToggle { accent-color: var(--accent); margin-right: 4px; }
+  #distHint { line-height: 1.4; }
+  #distTip { max-width: 230px; }
+  @media (max-width: 900px) {
+    #distCard { min-height: 0; }
+    #distWrap { flex-direction: column; min-height: 0; }
+    #distSide { flex: 0 0 auto; width: auto; }
+    #distPlot { flex: none; width: 100%; height: 520px; }
+  }
 </style>
 </head>
 <body>
@@ -1330,6 +1472,25 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     <div id="slotTable"></div>
   </section>
 </div>
+<section class="card" id="distCard">
+  <h2>分布力散点图 <span id="distMeta">N</span></h2>
+  <div id="distWrap">
+    <div class="plot" id="distPlot">
+      <canvas id="distCanvas"></canvas>
+      <div class="tip" id="distTip"></div>
+    </div>
+    <div id="distSide">
+      <div id="distLegend"></div>
+      <label class="hint" id="distArrowToggleWrap">
+        <input type="checkbox" id="distArrowToggle" checked> 切向箭头（Fx/Fy）
+      </label>
+      <div id="distReadout"></div>
+      <div class="hint">各槽位峰值 N</div>
+      <div id="distSlots"></div>
+      <div class="hint" id="distHint">贴片布局按 PXCap III 参考图；点位形状来自 Studio 测点模型；箭头长度按切向模长、方向为切向合力，非标定。</div>
+    </div>
+  </div>
+</section>
 <section class="card" id="questCard" style="display:none">
   <h2>Quest 3 <span id="questMeta"></span></h2>
   <div class="quest-note" id="questAlignNote">Quest 使用独立 SDK 时间轴，未做跨源时间对齐</div>
@@ -1386,6 +1547,22 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 const DATA = __PAYLOAD__;
 const CAP = DATA.cap, SLOT = DATA.slot_force, META = DATA.meta;
 const QUEST = DATA.quest;
+const DIST = (SLOT && SLOT.dist) || null;
+let DIST_DATA = null;
+const DIST_HIT = [];
+let DIST_SLOT_CELLS = [];
+let DIST_TANGENT = null;
+let DIST_ARROWS_ON = false;
+const DIST_LABELS = [
+  '拇指1', '拇指2', '食指0', '食指1', '中指0',
+  '中指1', '中指2', '中指3', '掌心0', '掌心1',
+];
+// Real-hardware recheck after the per-slot point flips: raw Fx/Fy now match
+// the 2D pad map, so no extra 180° sign correction is applied.
+const TANGENT_SIGN = 1;
+// Colour mapping exponent: sqrt lifts weak contacts on the fixed 0–25 N
+// scale; point radius still follows the linear ratio.
+const DIST_COLOR_GAMMA = 0.5;
 let questNoticeShown = false;
 const N = CAP.t.length;
 const T0 = CAP.t[0] || 0;
@@ -1686,6 +1863,260 @@ function drawSlotTable() {
     const countSum = counts.reduce((a, b) => a + b, 0);
     total[5].textContent = counts.length ? countSum : '—';
   }
+}
+
+// ---------- distribution-force hand scatter plot ----------
+// Point positions come from DIST.points: 10 slots of 2D coordinates in the
+// 0..1 canvas.  Sensor-pad shapes are derived from the local PXCap Studio
+// models; their placement on the hand is schematic, not calibrated.
+
+const HEAT_STOPS = [
+  [0.00, [16, 23, 34]],
+  [0.25, [30, 75, 122]],
+  [0.50, [42, 167, 161]],
+  [0.75, [242, 193, 78]],
+  [1.00, [228, 87, 46]],
+];
+
+function heatColor(t) {
+  t = Math.max(0, Math.min(1, t));
+  for (let i = 1; i < HEAT_STOPS.length; i++) {
+    const [p1, c1] = HEAT_STOPS[i];
+    if (t <= p1) {
+      const [p0, c0] = HEAT_STOPS[i - 1];
+      const u = (t - p0) / (p1 - p0 || 1);
+      const rgb = c0.map((v, j) => Math.round(v + (c1[j] - v) * u));
+      return 'rgb(' + rgb.join(',') + ')';
+    }
+  }
+  return 'rgb(228,87,46)';
+}
+
+function initDistribution() {
+  if (!DIST) {
+    el('distMeta').textContent = '无数据';
+    el('distReadout').innerHTML =
+      '<div class="hint">本次采集没有分布力数据（采集时使用了 --omit-distribution）。</div>';
+    el('distPlot').style.display = 'none';
+    el('distHint').style.display = 'none';
+    return;
+  }
+  if (DIST.layout_source === 'schematic') {
+    el('distHint').textContent =
+      '未找到本地 Studio 测点模型，使用示意网格；贴片位置为示意，非标定。';
+  }
+  const bin = atob(DIST.data);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  DIST_DATA = new Uint16Array(bytes.buffer);
+  if (DIST.tangent) {
+    const tbin = atob(DIST.tangent);
+    const tbytes = new Uint8Array(tbin.length);
+    for (let i = 0; i < tbin.length; i++) tbytes[i] = tbin.charCodeAt(i);
+    DIST_TANGENT = new Int8Array(tbytes.buffer);
+    DIST_ARROWS_ON = true;
+    const toggle = el('distArrowToggle');
+    toggle.checked = true;
+    toggle.disabled = false;
+    toggle.addEventListener('change', () => {
+      DIST_ARROWS_ON = toggle.checked;
+      drawDistribution();
+    });
+  } else {
+    el('distArrowToggleWrap').style.display = 'none';
+  }
+  el('distMeta').textContent =
+    DIST.shape[0] + '×' + DIST.shape[1] + ' 点';
+  el('distLegend').innerHTML =
+    '<div class="bar"></div>' +
+    '<div class="row"><span>0 N</span><span>' + DIST.scale_n.toFixed(1) + ' N</span></div>' +
+    '<div class="row"><span>幂函数色标</span><span>当前帧</span></div>';
+  const bar = el('distLegend').querySelector('.bar');
+  if (bar) {
+    const stops = [0, 0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875, 1];
+    bar.style.background = 'linear-gradient(90deg,' + stops.map(
+      t => heatColor(Math.pow(t, DIST_COLOR_GAMMA)) + ' ' + (t * 100) + '%'
+    ).join(',') + ')';
+  }
+  const labels = DIST_LABELS;
+  el('distSlots').innerHTML = labels.map(
+    (label, i) => '<span>' + label + '</span><b data-slot="' + i + '">—</b>'
+  ).join('');
+  DIST_SLOT_CELLS = Array.from(el('distSlots').querySelectorAll('b'));
+}
+
+function drawDistribution() {
+  if (!DIST || !DIST_DATA) return;
+  const canvas = el('distCanvas');
+  const fitRes = fit(canvas);
+  if (!fitRes) return;
+  const { ctx, w, h } = fitRes;
+  DIST_HIT.length = 0;
+  const left = (META.hand_side || 'right') === 'left';
+
+  const k = slotIndex(CAP.t[state.i]);
+  const counts = (SLOT.counts && SLOT.counts[k]) || [];
+  const base = k * DIST.shape[0] * DIST.shape[1];
+  const labels = DIST_LABELS;
+  let validTotal = 0, peak = 0, peakSlot = -1;
+
+  ctx.font = '9px "Segoe UI", sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'bottom';
+
+  const points = DIST.points || [];
+  for (let slot = 0; slot < DIST.shape[0]; slot++) {
+    const slotPoints = points[slot] || [];
+    const capacity = (DIST.capacities && DIST.capacities[slot]) || DIST.shape[1];
+    const count = Math.min(Number(counts[slot] || 0), capacity, slotPoints.length);
+    if (count <= 0) {
+      if (DIST_SLOT_CELLS[slot]) DIST_SLOT_CELLS[slot].textContent = '—';
+      continue;
+    }
+
+    let slotPeak = 0, minY = h, sumX = 0, drawn = 0;
+    const dots = [];
+    for (let point = 0; point < count; point++) {
+      const pair = slotPoints[point];
+      if (!pair) continue;
+      const x = (left ? 1 - pair[0] : pair[0]) * w;
+      const y = pair[1] * h;
+      const raw = DIST_DATA[base + slot * DIST.shape[1] + point] || 0;
+      const value = raw / 100;
+      if (value > slotPeak) slotPeak = value;
+      if (y < minY) minY = y;
+      sumX += x;
+      drawn++;
+      validTotal++;
+      if (value > peak) { peak = value; peakSlot = slot; }
+      dots.push({ x, y, value, point });
+    }
+    // Low-force dots first so a hot contact is never hidden by its neighbours.
+    dots.sort((a, b) => a.value - b.value);
+    for (const dot of dots) {
+      const linear = Math.min(1, dot.value / (DIST.scale_n || 1));
+      const ratio = Math.pow(linear, DIST_COLOR_GAMMA);
+      const radius = dot.value > 0 ? 2.2 + 2.6 * ratio : 2.0;
+      ctx.fillStyle = dot.value > 0 ? heatColor(ratio) : '#2a3646';
+      ctx.beginPath();
+      ctx.arc(dot.x, dot.y, radius, 0, Math.PI * 2);
+      ctx.fill();
+      DIST_HIT.push({
+        x: dot.x, y: dot.y, r: radius + 2,
+        slot, point: dot.point, value: dot.value,
+      });
+    }
+    if (DIST_TANGENT && DIST_ARROWS_ON) {
+      const rotDeg = (DIST.rotations && DIST.rotations[slot]) || 0;
+      const rot = rotDeg * Math.PI / 180;
+      const cosR = Math.cos(rot), sinR = Math.sin(rot);
+      const tanScale = DIST.tangent_scale_n || 1;
+      for (const dot of dots) {
+        const ti = (
+          (k * DIST.shape[0] + slot) * DIST.shape[1] + dot.point
+        ) * 2;
+        let fx = DIST_TANGENT[ti];
+        let fy = DIST_TANGENT[ti + 1];
+        if ((!fx && !fy) || fx === undefined) continue;
+        if (rot) {
+          const rx = fx * cosR - fy * sinR;
+          const ry = fx * sinR + fy * cosR;
+          fx = rx;
+          fy = ry;
+        }
+        fx *= TANGENT_SIGN;
+        fy *= TANGENT_SIGN;
+        const flip = DIST.flips && DIST.flips[slot];
+        if (flip === 'center') {
+          fx = -fx;
+          fy = -fy;
+        } else if (flip === 'v') {
+          fx = -fx;
+        } else if (flip === 'h') {
+          fy = -fy;
+        }
+        if (left) fx = -fx;
+        const mag = Math.hypot(fx, fy);
+        if (mag <= 0) continue;
+        const tanN = mag * 0.1;
+        if (tanN < 0.1) continue;
+        const len = 0 + 16 * Math.min(1, tanN / tanScale);
+        const ux = fx / mag, uy = fy / mag;
+        const ex = dot.x + ux * len;
+        const ey = dot.y + uy * len;
+        ctx.strokeStyle = 'rgba(228,242,255,0.9)';
+        ctx.lineWidth = 1.3;
+        ctx.beginPath();
+        ctx.moveTo(dot.x, dot.y);
+        ctx.lineTo(ex, ey);
+        ctx.stroke();
+        const ah = Math.min(5.5, len * 0.4);
+        const angle = Math.atan2(uy, ux);
+        ctx.fillStyle = 'rgba(215,232,255,0.85)';
+        ctx.beginPath();
+        ctx.moveTo(ex, ey);
+        ctx.lineTo(
+          ex - ah * Math.cos(angle - 0.5),
+          ey - ah * Math.sin(angle - 0.5)
+        );
+        ctx.lineTo(
+          ex - ah * Math.cos(angle + 0.5),
+          ey - ah * Math.sin(angle + 0.5)
+        );
+        ctx.closePath();
+        ctx.fill();
+      }
+    }
+    if (DIST_SLOT_CELLS[slot]) {
+      DIST_SLOT_CELLS[slot].textContent = slotPeak > 0 ? slotPeak.toFixed(2) : '—';
+      DIST_SLOT_CELLS[slot].style.color = slotPeak > 0 ? '#e7ecf5' : '#5d6879';
+    }
+    ctx.fillStyle = '#9aa6b8';
+    ctx.fillText(
+      labels[slot] || ('#' + slot),
+      drawn ? sumX / drawn : w * 0.5,
+      Math.max(12, minY - 4)
+    );
+  }
+
+  const peakLabel = peakSlot >= 0 ? (labels[peakSlot] || ('#' + peakSlot)) : '—';
+  el('distReadout').innerHTML =
+    '<b>帧 ' + CAP.frames[state.i] + ' · ' + fmtTime(CAP.t[state.i] - T0) + '</b><br>' +
+    '有效测点 ' + validTotal + ' 个<br>' +
+    '峰值 <b>' + peak.toFixed(2) + ' N</b>' +
+    (peakSlot >= 0 ? '（' + peakLabel + '）' : '');
+}
+
+function bindDistHover() {
+  const canvas = el('distCanvas');
+  const tip = el('distTip');
+  canvas.addEventListener('mousemove', event => {
+    if (!DIST || !DIST_DATA) return;
+    const rect = canvas.getBoundingClientRect();
+    const x = event.clientX - rect.left;
+    const y = event.clientY - rect.top;
+    let hit = null;
+    for (let i = DIST_HIT.length - 1; i >= 0; i--) {
+      const item = DIST_HIT[i];
+      const dx = x - item.x, dy = y - item.y;
+      if (dx * dx + dy * dy <= item.r * item.r) {
+        hit = item;
+        break;
+      }
+    }
+    if (!hit) { tip.style.display = 'none'; return; }
+    const label = DIST_LABELS[hit.slot] || ('#' + hit.slot);
+    const k = slotIndex(CAP.t[state.i]);
+    const count = (SLOT.counts && SLOT.counts[k]) ? SLOT.counts[k][hit.slot] : undefined;
+    tip.innerHTML =
+      '<b>' + label + ' · 点 ' + hit.point + '</b><br>|F| ' + hit.value.toFixed(2) + ' N' +
+      (count === undefined ? '' : '<br>槽位有效点数 ' + count);
+    tip.style.display = 'block';
+    const width = tip.offsetWidth;
+    tip.style.left = Math.min(rect.width - width - 6, Math.max(6, x + 12)) + 'px';
+    tip.style.top = Math.max(6, y - 34) + 'px';
+  });
+  canvas.addEventListener('mouseleave', () => { tip.style.display = 'none'; });
 }
 
 // ---------- readout ----------
@@ -2233,6 +2664,7 @@ function refresh() {
   drawOverlay('forceA', 'plotForceA');
   drawOverlay('forceB', 'plotForceB');
   drawSlotTable();
+  drawDistribution();
   updateReadout();
   updateClock();
   refreshQuest();
@@ -2296,6 +2728,7 @@ function buildHeader() {
   const facts = [
     ['时长', META.duration_s.toFixed(2) + ' s'],
     ['手套帧', META.rows],
+    ['手别', META.hand_side === 'left' ? '左手' : '右手'],
     ['速率', (META.rate_hz || 0).toFixed(1) + ' Hz'],
     ['Quest 行', META.quest_rows || 0],
     [
@@ -2395,6 +2828,7 @@ function boot() {
   buildHeader();
   buildLegends();
   initSlotTable();
+  initDistribution();
   buildCharts();
   buildQuest();
   buildVideos();
@@ -2405,6 +2839,7 @@ function boot() {
   bindHover('plotAngles');
   bindHover('plotForceA');
   bindHover('plotForceB');
+  bindDistHover();
 
   el('playBtn').onclick = () => state.playing ? pause() : play();
   el('speedBtn').onclick = () => {
@@ -2477,6 +2912,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-quest",
         action="store_true",
         help="不导出或绘制 Quest 数据",
+    )
+    parser.add_argument(
+        "--no-dist-arrows",
+        action="store_true",
+        help="不在 HTML 中打包/绘制每个测点的切向合力箭头（减小体积）",
     )
     parser.add_argument(
         "--quest-align",
@@ -2564,6 +3004,7 @@ def main(argv: list[str] | None = None) -> int:
             with_quest=not args.no_quest,
             quest_alignment=args.quest_align,
             quest_clock_report=clock_report,
+            with_dist_arrows=not args.no_dist_arrows,
         )
     except ValueError as exc:
         print(f"[错误] {exc}", file=sys.stderr)
@@ -2620,6 +3061,18 @@ def report_html(payload: dict[str, Any], out_path: Path) -> None:
     if payload["slot_force"]:
         print(f"  合力表 {payload['slot_force']['frames']} 帧 × "
               f"{payload['slot_force']['slots']} 路（单位 {payload['slot_force']['unit']}）")
+        dist = payload["slot_force"].get("dist")
+        if dist:
+            print(
+                f"  分布力散点图 {dist['shape'][0]} 槽位 × {dist['shape'][1]} 点，"
+                f"色标 0~{dist['scale_n']:.2f} N"
+            )
+            if dist.get("tangent"):
+                print(
+                    f"  切向箭头 99 分位 {dist['tangent_scale_n']:.2f} N"
+                )
+        else:
+            print("  分布力散点图：本次采集没有分布力数据")
     else:
         print("  合力表：本次采集没有合力数据")
     cams = payload.get("video", {}).get("cams") or []
